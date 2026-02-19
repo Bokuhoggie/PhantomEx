@@ -105,6 +105,12 @@ async def on_thought(agent_id: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # Restore agents that were active before last shutdown
+    agent_registry.load_agents(
+        on_trade=on_trade,
+        on_decision=on_decision,
+        on_thought=on_thought,
+    )
     market_feed.subscribe(on_price_update)
     asyncio.create_task(market_feed.start())
     print("[phantomex] Server started.")

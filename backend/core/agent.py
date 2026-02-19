@@ -324,6 +324,35 @@ class AgentRegistry:
     def all(self) -> list[Agent]:
         return list(self._agents.values())
 
+    def load_agents(self, on_trade=None, on_decision=None, on_thought=None) -> int:
+        """Restore all active agents from DB on startup. Returns count loaded."""
+        with get_db() as conn:
+            rows = conn.execute(
+                """SELECT id, name, model, mode, allowance, goal,
+                          trade_interval, risk_profile
+                   FROM agents WHERE active = 1"""
+            ).fetchall()
+        for row in rows:
+            agent = Agent(
+                agent_id=row["id"],
+                name=row["name"],
+                model=row["model"],
+                mode=row["mode"],
+                allowance=row["allowance"],
+                goal=row["goal"] or "",
+                trade_interval=row["trade_interval"] or 60.0,
+                risk_profile=row["risk_profile"] or "neutral",
+                on_trade=on_trade,
+                on_decision=on_decision,
+                on_thought=on_thought,
+            )
+            # Portfolio._load() already reconstructs cash + holdings from DB
+            self._agents[row["id"]] = agent
+        count = len(rows)
+        if count:
+            print(f"[registry] Restored {count} agent(s) from database.")
+        return count
+
     def remove(self, agent_id: str):
         self._agents.pop(agent_id, None)
         with get_db() as conn:
