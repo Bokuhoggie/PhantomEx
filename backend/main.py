@@ -178,6 +178,8 @@ class CreateAgentRequest(BaseModel):
     mode: str = "autonomous"
     allowance: float = 10000.0
     goal: str = ""
+    trade_interval: float = 60.0            # seconds between think cycles
+    initial_holdings: dict[str, float] = {} # {symbol: quantity} — declared, not bought
 
 
 @app.post("/api/agents")
@@ -188,10 +190,33 @@ async def create_agent(req: CreateAgentRequest):
         mode=req.mode,
         allowance=req.allowance,
         goal=req.goal,
+        trade_interval=req.trade_interval,
         on_trade=on_trade,
         on_decision=on_decision,
         on_thought=on_thought,
     )
+
+    # Seed initial holdings if provided — inserted directly (no cash deducted)
+    if req.initial_holdings:
+        from core.db import get_db
+        prices = market_feed.get_prices()
+        for symbol, quantity in req.initial_holdings.items():
+            symbol = symbol.upper()
+            if symbol not in prices or quantity <= 0:
+                continue
+            price = prices[symbol]["price"]
+            with get_db() as conn:
+                conn.execute(
+                    """INSERT INTO portfolios (agent_id, symbol, quantity, avg_cost, updated_at)
+                       VALUES (?, ?, ?, ?, datetime('now'))
+                       ON CONFLICT(agent_id, symbol) DO UPDATE SET
+                           quantity = excluded.quantity,
+                           avg_cost = excluded.avg_cost,
+                           updated_at = excluded.updated_at""",
+                    (agent.agent_id, symbol, quantity, price),
+                )
+            agent.portfolio._holdings[symbol] = {"quantity": quantity, "avg_cost": price}
+
     prices = market_feed.get_prices()
     data = {**agent.to_dict(), "portfolio": agent.portfolio.to_dict(prices)}
     await ws_manager.broadcast({"type": "agent_state", "data": data})

@@ -95,4 +95,6 @@ def init_db():
         cols = [r[1] for r in conn.execute("PRAGMA table_info(agents)").fetchall()]
         if "goal" not in cols:
             conn.execute("ALTER TABLE agents ADD COLUMN goal TEXT NOT NULL DEFAULT ''")
+        if "trade_interval" not in cols:
+            conn.execute("ALTER TABLE agents ADD COLUMN trade_interval REAL NOT NULL DEFAULT 60.0")
     print("[db] Database initialized.")

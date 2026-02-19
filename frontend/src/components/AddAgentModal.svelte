@@ -1,6 +1,7 @@
 <script>
   import { createEventDispatcher } from 'svelte'
   import { ollamaModels, selectedModel, connectionStatus } from '../lib/ollama.js'
+  import { prices } from '../lib/ws.js'
 
   const dispatch = createEventDispatcher()
 
@@ -11,6 +12,31 @@
   let goal = ''
   let loading = false
   let error = ''
+
+  // Trade frequency (slider in minutes, sent to backend as seconds)
+  let tradeIntervalMin = 1
+
+  // Coin search + initial holdings
+  const SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','AVAX','DOT','MATIC']
+  let coinSearch = ''
+  let coinQty = {}
+  let initialHoldings = {}
+
+  $: filteredCoins = coinSearch.trim()
+    ? SYMBOLS.filter(s => s.toLowerCase().includes(coinSearch.toLowerCase()))
+    : SYMBOLS
+
+  function addCoin(symbol) {
+    const qty = parseFloat(coinQty[symbol])
+    if (!qty || qty <= 0) return
+    initialHoldings = { ...initialHoldings, [symbol]: qty }
+    coinQty = { ...coinQty, [symbol]: '' }
+  }
+
+  function removeCoin(symbol) {
+    const { [symbol]: _, ...rest } = initialHoldings
+    initialHoldings = rest
+  }
 
   // Sync model with selectedModel store
   $: if ($selectedModel && !model) model = $selectedModel
@@ -24,7 +50,15 @@
       const res = await fetch('/api/agents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, model, mode, allowance, goal }),
+        body: JSON.stringify({
+          name,
+          model,
+          mode,
+          allowance,
+          goal,
+          trade_interval: tradeIntervalMin * 60,
+          initial_holdings: initialHoldings,
+        }),
       })
       if (!res.ok) throw new Error(await res.text())
       dispatch('close')
@@ -87,6 +121,74 @@
         </label>
       </div>
 
+      <!-- Trade Frequency -->
+      <div class="freq-section">
+        <label>
+          Trade Frequency
+          <div class="freq-row">
+            <input
+              type="range"
+              min="1"
+              max="60"
+              step="1"
+              bind:value={tradeIntervalMin}
+              class="freq-slider"
+            />
+            <span class="freq-label">
+              {tradeIntervalMin === 1 ? 'every minute' : `every ${tradeIntervalMin} min`}
+            </span>
+          </div>
+        </label>
+      </div>
+
+      <!-- Starting Holdings -->
+      <div class="holdings-section">
+        <div class="holdings-header">
+          Starting Holdings <span class="optional">(optional)</span>
+        </div>
+        <input
+          class="coin-search"
+          placeholder="Search coins..."
+          bind:value={coinSearch}
+        />
+        <div class="coin-list">
+          {#each filteredCoins as symbol}
+            {@const price = $prices[symbol]?.price}
+            <div class="coin-row">
+              <span class="coin-sym">{symbol}</span>
+              <span class="coin-price">
+                {#if price}${price.toLocaleString(undefined, {maximumFractionDigits: 2})}{:else}—{/if}
+              </span>
+              <input
+                class="qty-input"
+                type="number"
+                min="0"
+                step="any"
+                placeholder="qty"
+                bind:value={coinQty[symbol]}
+                on:keydown={e => e.key === 'Enter' && addCoin(symbol)}
+              />
+              <button
+                class="add-coin-btn"
+                on:click={() => addCoin(symbol)}
+                disabled={!coinQty[symbol] || parseFloat(coinQty[symbol]) <= 0}
+              >+ Add</button>
+            </div>
+          {/each}
+        </div>
+
+        {#if Object.keys(initialHoldings).length > 0}
+          <div class="holdings-chips">
+            {#each Object.entries(initialHoldings) as [symbol, qty]}
+              <span class="holding-chip">
+                {symbol} × {qty}
+                <button class="chip-remove" on:click={() => removeCoin(symbol)}>✕</button>
+              </span>
+            {/each}
+          </div>
+        {/if}
+      </div>
+
       {#if error}
         <div class="error">{error}</div>
       {/if}
@@ -113,7 +215,9 @@
     border: 1px solid #2e2e5a;
     border-radius: 10px;
     padding: 1.5rem;
-    width: 400px;
+    width: 500px;
+    max-height: 92vh;
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 1rem;
@@ -172,6 +276,144 @@
     font-size: 0.82rem;
     text-transform: none;
   }
+
+  /* Trade Frequency */
+  .freq-section { display: flex; flex-direction: column; }
+  .freq-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.3rem;
+  }
+  .freq-slider {
+    flex: 1;
+    accent-color: #7060d0;
+    cursor: pointer;
+    padding: 0;
+    border: none;
+    background: transparent;
+  }
+  .freq-label {
+    color: #a080ff;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    min-width: 100px;
+    text-transform: none;
+    font-weight: 500;
+  }
+
+  /* Starting Holdings */
+  .holdings-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .holdings-header {
+    font-size: 0.78rem;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .optional {
+    font-size: 0.62rem;
+    color: #444;
+    font-weight: 400;
+    text-transform: none;
+  }
+  .coin-search {
+    background: #1a1a30;
+    border: 1px solid #2e2e5a;
+    color: #e0e0ff;
+    padding: 0.4rem 0.65rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    outline: none;
+    resize: none;
+  }
+  .coin-search:focus { border-color: #7060d0; }
+  .coin-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    max-height: 160px;
+    overflow-y: auto;
+    border: 1px solid #2e2e5a;
+    border-radius: 6px;
+    padding: 0.35rem;
+    background: #0d0d1a;
+  }
+  .coin-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.2rem 0.3rem;
+    border-radius: 4px;
+  }
+  .coin-row:hover { background: #1a1a30; }
+  .coin-sym {
+    font-weight: 700;
+    color: #c0b8ff;
+    width: 44px;
+    font-size: 0.82rem;
+  }
+  .coin-price {
+    color: #555;
+    font-family: monospace;
+    font-size: 0.75rem;
+    flex: 1;
+  }
+  .qty-input {
+    background: #1a1a30;
+    border: 1px solid #2e2e5a;
+    color: #e0e0ff;
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-size: 0.78rem;
+    width: 72px;
+    outline: none;
+    resize: none;
+  }
+  .qty-input:focus { border-color: #7060d0; }
+  .add-coin-btn {
+    background: #1a2a1a;
+    color: #00d4a0;
+    border: 1px solid #00d4a0;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .add-coin-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .add-coin-btn:hover:not(:disabled) { background: #0a2a1a; }
+
+  .holdings-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .holding-chip {
+    background: #1e1e3a;
+    border: 1px solid #3a2a6a;
+    color: #a080ff;
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .chip-remove {
+    background: none;
+    border: none;
+    color: #555;
+    cursor: pointer;
+    font-size: 0.7rem;
+    padding: 0;
+    line-height: 1;
+  }
+  .chip-remove:hover { color: #ff4d6d; }
+
   .error { color: #ff4d6d; font-size: 0.8rem; }
   .submit-btn {
     background: #5a3aaa;

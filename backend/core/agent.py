@@ -85,6 +85,7 @@ class Agent:
         mode: str = "autonomous",
         allowance: float = 10000.0,
         goal: str = "",
+        trade_interval: float = 60.0,
         on_trade: Optional[Callable] = None,
         on_decision: Optional[Callable] = None,
         on_thought: Optional[Callable] = None,
@@ -95,6 +96,8 @@ class Agent:
         self.mode = mode  # "autonomous" | "advisory"
         self.allowance = allowance
         self.goal = goal
+        self.trade_interval = trade_interval  # seconds between think cycles
+        self._last_run_at: float = 0.0        # unix timestamp of last cycle
         self.on_trade = on_trade
         self.on_decision = on_decision
         self.on_thought = on_thought
@@ -167,9 +170,13 @@ class Agent:
             return None
 
     async def run_once(self, prices: dict):
-        """Single decision cycle."""
+        """Single decision cycle. Skips if trade_interval has not elapsed."""
+        import time
         if not prices:
             return
+        if time.time() - self._last_run_at < self.trade_interval:
+            return  # not time yet
+        self._last_run_at = time.time()
         try:
             decision = await self.think(prices)
         except Exception as e:
@@ -210,6 +217,7 @@ class Agent:
             "mode": self.mode,
             "allowance": self.allowance,
             "goal": self.goal,
+            "trade_interval": self.trade_interval,
             "running": self._running,
             "pending_decision": self._pending_decision,
             "last_thought": self.last_thought,
@@ -229,6 +237,7 @@ class AgentRegistry:
         mode: str = "autonomous",
         allowance: float = 10000.0,
         goal: str = "",
+        trade_interval: float = 60.0,
         on_trade=None,
         on_decision=None,
         on_thought=None,
@@ -236,8 +245,8 @@ class AgentRegistry:
         agent_id = str(uuid.uuid4())
         with get_db() as conn:
             conn.execute(
-                "INSERT INTO agents (id, name, model, mode, allowance, goal) VALUES (?, ?, ?, ?, ?, ?)",
-                (agent_id, name, model, mode, allowance, goal),
+                "INSERT INTO agents (id, name, model, mode, allowance, goal, trade_interval) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (agent_id, name, model, mode, allowance, goal, trade_interval),
             )
         agent = Agent(
             agent_id=agent_id,
@@ -246,6 +255,7 @@ class AgentRegistry:
             mode=mode,
             allowance=allowance,
             goal=goal,
+            trade_interval=trade_interval,
             on_trade=on_trade,
             on_decision=on_decision,
             on_thought=on_thought,

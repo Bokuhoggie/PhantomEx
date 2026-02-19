@@ -76,9 +76,17 @@ function send(msg) {
 function connect() {
   socket = new WebSocket(WS_URL)
 
-  socket.onopen = () => {
+  socket.onopen = async () => {
     connected.set(true)
     console.log('[ws] Connected to PhantomEx')
+    // Seed historical trade log from REST so log is never empty on page load
+    try {
+      const res = await fetch('/api/trades?limit=500')
+      const data = await res.json()
+      trades.set(data)
+    } catch (e) {
+      console.warn('[ws] Could not seed trade history', e)
+    }
   }
 
   socket.onmessage = (e) => {

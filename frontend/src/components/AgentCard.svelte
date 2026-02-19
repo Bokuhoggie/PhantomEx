@@ -8,7 +8,7 @@
   $: pnl = portfolio.unrealized_pnl || {}
   $: pending = $pendingDecisions[agent.id]
   $: thought = agent.last_thought
-  $: agentTrades = $trades.filter(t => t.agent_id === agent.id).slice(0, 5)
+  $: agentTrades = $trades.filter(t => t.agent_id === agent.id)
   $: pnlDiff = (portfolio.total_value || 0) - (agent.allowance || 0)
   $: pnlPct = fmt((pnlDiff / (agent.allowance || 1)) * 100)
   $: inPositions = (agent.allowance || 0) - (portfolio.cash || 0)
@@ -16,6 +16,7 @@
   let trading = false
   let tradeFlash = false
   let walletOpen = false
+  let logOpen = false
   let depositAmount = ''
   let depositing = false
   let depositError = ''
@@ -80,6 +81,9 @@
     <div class="agent-name">{agent.name}</div>
     <div class="agent-meta">
       <span class="model-badge">{agent.model}</span>
+      {#if agent.trade_interval}
+        <span class="interval-badge">⏱ {agent.trade_interval >= 60 ? Math.round(agent.trade_interval / 60) + 'm' : agent.trade_interval + 's'}</span>
+      {/if}
       <button class="mode-btn" on:click={toggleMode}>{agent.mode}</button>
       <button class="delete-btn" on:click={deleteAgent}>✕</button>
     </div>
@@ -217,23 +221,34 @@
     </div>
   {/if}
 
-  <!-- Recent trades -->
-  {#if agentTrades.length > 0}
-    <div class="section">
-      <div class="section-label">Recent Trades</div>
-      <div class="trade-list">
-        {#each agentTrades as t}
-          <div class="trade-item">
-            <span class="t-side" class:buy={t.side==='buy'} class:sell={t.side==='sell'}>{t.side.toUpperCase()}</span>
-            <span class="t-sym">{t.symbol}</span>
-            <span class="t-qty">{fmt(t.quantity, 4)}</span>
-            <span class="t-price">@ ${fmt(t.price)}</span>
-            <span class="t-time">{fmtTime(t.timestamp)}</span>
-          </div>
-        {/each}
+  <!-- Trade Log -->
+  <div class="section">
+    <button class="section-toggle" on:click={() => logOpen = !logOpen}>
+      <span class="section-label">Trade Log ({agentTrades.length})</span>
+      <span class="toggle-arrow">{logOpen ? '▲' : '▼'}</span>
+    </button>
+    {#if logOpen}
+      <div class="trade-log-body">
+        {#if agentTrades.length === 0}
+          <div class="log-empty">No trades yet.</div>
+        {:else}
+          {#each agentTrades as t}
+            <div class="trade-item">
+              <span class="t-side" class:buy={t.side==='buy'} class:sell={t.side==='sell'}>{t.side.toUpperCase()}</span>
+              <span class="t-sym">{t.symbol}</span>
+              <span class="t-qty">{fmt(t.quantity, 6)}</span>
+              <span class="t-price">@ ${fmt(t.price)}</span>
+              <span class="t-total">${fmt(t.total)}</span>
+              <span class="t-time">{fmtTime(t.timestamp)}</span>
+            </div>
+            {#if t.reasoning}
+              <div class="t-reasoning">"{t.reasoning}"</div>
+            {/if}
+          {/each}
+        {/if}
       </div>
-    </div>
-  {/if}
+    {/if}
+  </div>
 </div>
 
 <style>
@@ -438,16 +453,48 @@
   .thought-reasoning { font-size: 0.78rem; color: #8888aa; font-style: italic; }
   .thought-time { font-size: 0.65rem; color: #444; }
 
-  .trade-list { display: flex; flex-direction: column; gap: 0.2rem; }
+  .interval-badge {
+    background: #1a1430;
+    color: #7060d0;
+    font-size: 0.65rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid #3a2a6a;
+    white-space: nowrap;
+  }
+
+  .trade-log-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    background: #0d0d1a;
+    border: 1px solid #1e1e3a;
+    border-radius: 6px;
+    padding: 0.5rem 0.6rem;
+    max-height: 260px;
+    overflow-y: auto;
+  }
+  .log-empty { font-size: 0.75rem; color: #444; font-style: italic; }
   .trade-item {
     display: flex;
-    gap: 0.5rem;
-    font-size: 0.75rem;
+    gap: 0.4rem;
+    font-size: 0.73rem;
     align-items: center;
+    padding: 0.1rem 0;
   }
   .t-side { font-weight: 700; width: 32px; }
   .t-sym { color: #c0b8ff; width: 38px; font-weight: 600; }
   .t-qty { font-family: monospace; color: #c0c0d0; flex: 1; }
   .t-price { font-family: monospace; color: #888; }
-  .t-time { color: #444; font-size: 0.68rem; }
+  .t-total { font-family: monospace; color: #6a5aaa; font-size: 0.7rem; }
+  .t-time { color: #444; font-size: 0.66rem; }
+  .t-reasoning {
+    font-size: 0.68rem;
+    color: #55557a;
+    font-style: italic;
+    padding: 0 0 0.3rem 0.5rem;
+    border-left: 1px solid #2e2e5a;
+    margin-left: 2px;
+    line-height: 1.3;
+  }
 </style>
