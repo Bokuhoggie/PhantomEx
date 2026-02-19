@@ -286,3 +286,18 @@ async def list_ollama_models(host: Optional[str] = None):
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "0.1.0"}
+
+
+# ── Serve frontend static files (must be last) ───────────────────────────────
+
+import os
+from fastapi.responses import FileResponse
+
+_frontend_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+if os.path.isdir(_frontend_dist):
+    app.mount("/assets", StaticFiles(directory=os.path.join(_frontend_dist, "assets")), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        index = os.path.join(_frontend_dist, "index.html")
+        return FileResponse(index)
