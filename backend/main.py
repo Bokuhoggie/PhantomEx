@@ -49,7 +49,7 @@ class ConnectionManager:
 
 
 ws_manager = ConnectionManager()
-market_feed = MarketFeed(mode="live", interval=15.0)
+market_feed = MarketFeed(mode="live", interval=60.0)
 agent_registry = AgentRegistry()
 
 
@@ -272,12 +272,10 @@ async def get_trades(agent_id: Optional[str] = None, limit: int = 100):
 async def list_ollama_models(host: Optional[str] = None):
     """List available models from the Ollama instance at the given host."""
     try:
-        import ollama
-        if host:
-            client = ollama.Client(host=host)
-            models = client.list()
-        else:
-            models = ollama.list()
+        import ollama, os
+        effective_host = host or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+        client = ollama.Client(host=effective_host)
+        models = client.list()
         return [m["model"] for m in models.get("models", [])]
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Ollama error: {e}")

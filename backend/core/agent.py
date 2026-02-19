@@ -11,9 +11,14 @@ from datetime import datetime
 from typing import Callable, Optional
 
 import ollama
+import os
 
 from core.portfolio import Portfolio
 from core.db import get_db
+
+# Use OLLAMA_HOST env var if set (e.g. timone uses port 8081)
+_ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+_ollama_client = ollama.Client(host=_ollama_host)
 
 
 BASE_SYSTEM_PROMPT = """You are PhantomEx, an AI crypto trading agent. You analyze market data and make trading decisions.
@@ -102,7 +107,7 @@ class Agent:
             {"role": "system", "content": build_system_prompt(self.goal)},
             {"role": "user", "content": context},
         ]
-        response = ollama.chat(model=self.model, messages=messages)
+        response = _ollama_client.chat(model=self.model, messages=messages)
         raw = response["message"]["content"].strip()
 
         # Strip markdown code fences if present
