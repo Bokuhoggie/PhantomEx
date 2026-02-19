@@ -9,9 +9,9 @@ const STORAGE_KEY = 'phantomex_ollama_host'
 
 function loadHost() {
   try {
-    return localStorage.getItem(STORAGE_KEY) || 'http://localhost:11434'
+    return localStorage.getItem(STORAGE_KEY) || 'http://localhost:8081'
   } catch {
-    return 'http://localhost:11434'
+    return 'http://localhost:8081'
   }
 }
 
