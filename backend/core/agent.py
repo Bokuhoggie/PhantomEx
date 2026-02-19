@@ -36,10 +36,11 @@ Respond ONLY with a valid JSON object in this exact format:
 }}
 
 Rules:
-- Never spend more than 20% of total portfolio value on a single trade
+- quantity is the NUMBER OF COINS/TOKENS, not dollar amount. BTC costs ~$60000 each so 0.001 BTC = $60
+- Never spend more than 20% of your cash balance on a single trade
 - Never sell more than you own
 - If uncertain, prefer hold
-- quantity must be a positive number
+- quantity must be a positive number (can be fractional, e.g. 0.001)
 
 {goal_section}"""
 
@@ -86,6 +87,7 @@ class Agent:
         goal: str = "",
         on_trade: Optional[Callable] = None,
         on_decision: Optional[Callable] = None,
+        on_thought: Optional[Callable] = None,
     ):
         self.agent_id = agent_id
         self.name = name
@@ -95,6 +97,7 @@ class Agent:
         self.goal = goal
         self.on_trade = on_trade
         self.on_decision = on_decision
+        self.on_thought = on_thought
         self.portfolio = Portfolio(agent_id)
         self._running = False
         self._pending_decision: Optional[dict] = None
@@ -186,6 +189,9 @@ class Agent:
             self._pending_decision = decision
             if self.on_decision:
                 await self.on_decision(self.agent_id, decision)
+        # Always broadcast updated agent state after a think cycle
+        if self.on_thought:
+            await self.on_thought(self.agent_id)
 
     async def approve_pending(self, prices: dict):
         """Human approves the pending advisory decision."""
@@ -225,6 +231,7 @@ class AgentRegistry:
         goal: str = "",
         on_trade=None,
         on_decision=None,
+        on_thought=None,
     ) -> Agent:
         agent_id = str(uuid.uuid4())
         with get_db() as conn:
@@ -241,6 +248,7 @@ class AgentRegistry:
             goal=goal,
             on_trade=on_trade,
             on_decision=on_decision,
+            on_thought=on_thought,
         )
         self._agents[agent_id] = agent
         return agent

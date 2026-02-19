@@ -89,6 +89,17 @@ async def on_decision(agent_id: str, decision: dict):
     })
 
 
+async def on_thought(agent_id: str):
+    """Broadcast updated agent state after any think cycle (holds, rejections, advisory)."""
+    agent = agent_registry.get(agent_id)
+    if agent:
+        prices = market_feed.get_prices()
+        await ws_manager.broadcast({
+            "type": "agent_state",
+            "data": {**agent.to_dict(), "portfolio": agent.portfolio.to_dict(prices)},
+        })
+
+
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -179,6 +190,7 @@ async def create_agent(req: CreateAgentRequest):
         goal=req.goal,
         on_trade=on_trade,
         on_decision=on_decision,
+        on_thought=on_thought,
     )
     prices = market_feed.get_prices()
     data = {**agent.to_dict(), "portfolio": agent.portfolio.to_dict(prices)}
