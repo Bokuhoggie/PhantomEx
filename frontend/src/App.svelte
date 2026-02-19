@@ -4,6 +4,7 @@
   import AgentCard from './components/AgentCard.svelte'
   import TradeLog from './components/TradeLog.svelte'
   import AddAgentModal from './components/AddAgentModal.svelte'
+  import OllamaSetup from './components/OllamaSetup.svelte'
 
   let showAddAgent = false
 </script>
@@ -13,6 +14,9 @@
   <header>
     <div class="logo">
       <span class="phantom">Phantom</span><span class="ex">Ex</span>
+    </div>
+    <div class="header-center">
+      <OllamaSetup />
     </div>
     <div class="header-right">
       <span class="ws-status" class:connected={$connected}>
@@ -90,6 +94,13 @@
     padding: 0.75rem 1.5rem;
     background: #0a0a18;
     border-bottom: 1px solid #1e1e3a;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+  }
+  .header-center {
+    flex: 1;
+    display: flex;
+    justify-content: center;
   }
 
   .logo {

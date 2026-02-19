@@ -64,14 +64,19 @@ async def on_price_update(prices: dict):
 
 async def on_trade(agent_id: str, trade: dict):
     await ws_manager.broadcast({"type": "trade", "agent_id": agent_id, "data": trade})
-    # Broadcast updated portfolio
     agent = agent_registry.get(agent_id)
     if agent:
-        portfolio_data = agent.portfolio.to_dict(market_feed.get_prices())
+        prices = market_feed.get_prices()
+        # Broadcast updated portfolio
         await ws_manager.broadcast({
             "type": "portfolio",
             "agent_id": agent_id,
-            "data": portfolio_data,
+            "data": agent.portfolio.to_dict(prices),
+        })
+        # Broadcast updated agent state (includes last_thought)
+        await ws_manager.broadcast({
+            "type": "agent_state",
+            "data": {**agent.to_dict(), "portfolio": agent.portfolio.to_dict(prices)},
         })
 
 
@@ -161,6 +166,7 @@ class CreateAgentRequest(BaseModel):
     model: str
     mode: str = "autonomous"
     allowance: float = 10000.0
+    goal: str = ""
 
 
 @app.post("/api/agents")
@@ -170,6 +176,7 @@ async def create_agent(req: CreateAgentRequest):
         model=req.model,
         mode=req.mode,
         allowance=req.allowance,
+        goal=req.goal,
         on_trade=on_trade,
         on_decision=on_decision,
     )
@@ -196,6 +203,21 @@ async def delete_agent(agent_id: str):
     agent_registry.remove(agent_id)
     await ws_manager.broadcast({"type": "agent_removed", "agent_id": agent_id})
     return {"ok": True}
+
+
+@app.post("/api/agents/{agent_id}/trade")
+async def trigger_trade(agent_id: str):
+    """Manually trigger one decision cycle for an agent (for testing)."""
+    agent = agent_registry.get(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    prices = market_feed.get_prices()
+    if not prices:
+        raise HTTPException(status_code=503, detail="No market data yet")
+    asyncio.create_task(agent.run_once(prices))
+    # Broadcast updated agent state (last_thought will update async)
+    await asyncio.sleep(0)  # yield so task can start
+    return {"ok": True, "message": "Decision cycle triggered"}
 
 
 @app.patch("/api/agents/{agent_id}/mode")
@@ -247,12 +269,16 @@ async def get_trades(agent_id: Optional[str] = None, limit: int = 100):
 
 
 @app.get("/api/ollama/models")
-async def list_ollama_models():
-    """List available models from the local Ollama instance."""
+async def list_ollama_models(host: Optional[str] = None):
+    """List available models from the Ollama instance at the given host."""
     try:
         import ollama
-        models = ollama.list()
-        return [m["name"] for m in models.get("models", [])]
+        if host:
+            client = ollama.Client(host=host)
+            models = client.list()
+        else:
+            models = ollama.list()
+        return [m["model"] for m in models.get("models", [])]
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Ollama error: {e}")
 

@@ -16,27 +16,35 @@ from core.portfolio import Portfolio
 from core.db import get_db
 
 
-SYSTEM_PROMPT = """You are PhantomEx, an AI crypto trading agent. You analyze market data and make trading decisions.
+BASE_SYSTEM_PROMPT = """You are PhantomEx, an AI crypto trading agent. You analyze market data and make trading decisions.
 
 You will receive:
 - Current prices and 24h changes for available assets
 - Your current portfolio (cash balance + holdings)
-- Recent trade history
 
 Respond ONLY with a valid JSON object in this exact format:
-{
+{{
   "action": "buy" | "sell" | "hold",
-  "symbol": "BTC" | "ETH" | "SOL" | ... (required if action is buy/sell),
+  "symbol": "BTC" | "ETH" | "SOL" | "BNB" | "XRP" | "ADA" | "DOGE" | "AVAX" | "DOT" | "MATIC",
   "quantity": <float> (required if action is buy/sell),
-  "reasoning": "<brief explanation of your decision>"
-}
+  "reasoning": "<your reasoning in 1-2 sentences>"
+}}
 
 Rules:
 - Never spend more than 20% of total portfolio value on a single trade
 - Never sell more than you own
-- Be concise in reasoning (1-2 sentences max)
 - If uncertain, prefer hold
-"""
+- quantity must be a positive number
+
+{goal_section}"""
+
+
+def build_system_prompt(goal: str) -> str:
+    if goal:
+        goal_section = f"Your trading goal: {goal}"
+    else:
+        goal_section = "Your trading goal: Grow the portfolio value over time."
+    return BASE_SYSTEM_PROMPT.format(goal_section=goal_section)
 
 
 def build_market_context(prices: dict, portfolio: Portfolio) -> str:
@@ -70,6 +78,7 @@ class Agent:
         model: str,
         mode: str = "autonomous",
         allowance: float = 10000.0,
+        goal: str = "",
         on_trade: Optional[Callable] = None,
         on_decision: Optional[Callable] = None,
     ):
@@ -78,17 +87,19 @@ class Agent:
         self.model = model
         self.mode = mode  # "autonomous" | "advisory"
         self.allowance = allowance
-        self.on_trade = on_trade        # async callback when a trade executes
-        self.on_decision = on_decision  # async callback for advisory mode (pending decisions)
+        self.goal = goal
+        self.on_trade = on_trade
+        self.on_decision = on_decision
         self.portfolio = Portfolio(agent_id)
         self._running = False
         self._pending_decision: Optional[dict] = None
+        self.last_thought: Optional[dict] = None  # last model decision + reasoning
 
     async def think(self, prices: dict) -> dict:
         """Ask the model what to do given current market conditions."""
         context = build_market_context(prices, self.portfolio)
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": build_system_prompt(self.goal)},
             {"role": "user", "content": context},
         ]
         response = ollama.chat(model=self.model, messages=messages)
@@ -96,9 +107,10 @@ class Agent:
 
         # Strip markdown code fences if present
         if raw.startswith("```"):
-            raw = raw.split("```")[1]
+            raw = raw[3:]
             if raw.startswith("json"):
                 raw = raw[4:]
+            raw = raw.rsplit("```", 1)[0]
         raw = raw.strip()
 
         decision = json.loads(raw)
@@ -109,6 +121,16 @@ class Agent:
     async def execute_decision(self, decision: dict, prices: dict) -> Optional[dict]:
         """Execute a trade decision. Returns trade record or None if hold."""
         action = decision.get("action", "hold").lower()
+
+        # Store thought regardless of action
+        self.last_thought = {
+            "action": action,
+            "symbol": decision.get("symbol", ""),
+            "quantity": decision.get("quantity", 0),
+            "reasoning": decision.get("reasoning", ""),
+            "timestamp": decision.get("timestamp", datetime.utcnow().isoformat()),
+        }
+
         if action == "hold":
             return None
 
@@ -138,6 +160,8 @@ class Agent:
 
     async def run_once(self, prices: dict):
         """Single decision cycle."""
+        if not prices:
+            return
         try:
             decision = await self.think(prices)
         except Exception as e:
@@ -147,6 +171,13 @@ class Agent:
         if self.mode == "autonomous":
             await self.execute_decision(decision, prices)
         elif self.mode == "advisory":
+            self.last_thought = {
+                "action": decision.get("action", "hold"),
+                "symbol": decision.get("symbol", ""),
+                "quantity": decision.get("quantity", 0),
+                "reasoning": decision.get("reasoning", ""),
+                "timestamp": decision.get("timestamp", datetime.utcnow().isoformat()),
+            }
             self._pending_decision = decision
             if self.on_decision:
                 await self.on_decision(self.agent_id, decision)
@@ -167,8 +198,10 @@ class Agent:
             "model": self.model,
             "mode": self.mode,
             "allowance": self.allowance,
+            "goal": self.goal,
             "running": self._running,
             "pending_decision": self._pending_decision,
+            "last_thought": self.last_thought,
         }
 
 
@@ -184,14 +217,15 @@ class AgentRegistry:
         model: str,
         mode: str = "autonomous",
         allowance: float = 10000.0,
+        goal: str = "",
         on_trade=None,
         on_decision=None,
     ) -> Agent:
         agent_id = str(uuid.uuid4())
         with get_db() as conn:
             conn.execute(
-                "INSERT INTO agents (id, name, model, mode, allowance) VALUES (?, ?, ?, ?, ?)",
-                (agent_id, name, model, mode, allowance),
+                "INSERT INTO agents (id, name, model, mode, allowance, goal) VALUES (?, ?, ?, ?, ?, ?)",
+                (agent_id, name, model, mode, allowance, goal),
             )
         agent = Agent(
             agent_id=agent_id,
@@ -199,6 +233,7 @@ class AgentRegistry:
             model=model,
             mode=mode,
             allowance=allowance,
+            goal=goal,
             on_trade=on_trade,
             on_decision=on_decision,
         )

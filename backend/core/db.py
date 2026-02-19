@@ -40,6 +40,7 @@ def init_db():
                 model       TEXT NOT NULL,
                 mode        TEXT NOT NULL DEFAULT 'autonomous',
                 allowance   REAL NOT NULL DEFAULT 10000.0,
+                goal        TEXT NOT NULL DEFAULT '',
                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
                 active      INTEGER NOT NULL DEFAULT 1
             );
@@ -50,7 +51,8 @@ def init_db():
                 symbol      TEXT NOT NULL,
                 quantity    REAL NOT NULL DEFAULT 0.0,
                 avg_cost    REAL NOT NULL DEFAULT 0.0,
-                updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(agent_id, symbol)
             );
 
             CREATE TABLE IF NOT EXISTS trades (
@@ -84,4 +86,13 @@ def init_db():
                 timestamp   TEXT NOT NULL DEFAULT (datetime('now'))
             );
         """)
+        # Migrations for existing databases
+        conn.executescript("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolios_agent_symbol
+                ON portfolios(agent_id, symbol);
+        """)
+        # Add goal column to agents if it doesn't exist yet
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(agents)").fetchall()]
+        if "goal" not in cols:
+            conn.execute("ALTER TABLE agents ADD COLUMN goal TEXT NOT NULL DEFAULT ''")
     print("[db] Database initialized.")
