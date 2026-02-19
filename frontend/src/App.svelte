@@ -15,9 +15,6 @@
     <div class="logo">
       <span class="phantom">Phantom</span><span class="ex">Ex</span>
     </div>
-    <div class="header-center">
-      <OllamaSetup />
-    </div>
     <div class="header-right">
       <span class="ws-status" class:connected={$connected}>
         {$connected ? '● LIVE' : '○ CONNECTING'}
@@ -30,6 +27,11 @@
 
   <!-- Live price ticker -->
   <PriceBar />
+
+  <!-- Ollama setup panel -->
+  <div class="setup-panel">
+    <OllamaSetup />
+  </div>
 
   <!-- Main content -->
   <main>
@@ -95,18 +97,13 @@
     background: #0a0a18;
     border-bottom: 1px solid #1e1e3a;
     gap: 1.5rem;
-    flex-wrap: wrap;
-  }
-  .header-center {
-    flex: 1;
-    display: flex;
-    justify-content: center;
   }
 
   .logo {
     font-size: 1.3rem;
     font-weight: 800;
     letter-spacing: -0.5px;
+    flex-shrink: 0;
   }
   .phantom { color: #a080ff; }
   .ex { color: #00d4a0; }
@@ -137,13 +134,20 @@
   }
   .add-agent-btn:hover { background: #5a3aaa; }
 
+  /* Ollama setup panel — full width, between price bar and main */
+  .setup-panel {
+    background: #0a0a18;
+    border-bottom: 1px solid #1e1e3a;
+    padding: 0.65rem 1.5rem;
+  }
+
   main {
     flex: 1;
     padding: 1.5rem;
     display: flex;
     flex-direction: column;
     gap: 2rem;
-    max-width: 1400px;
+    max-width: 1600px;
     margin: 0 auto;
     width: 100%;
   }

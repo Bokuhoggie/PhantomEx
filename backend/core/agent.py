@@ -110,7 +110,7 @@ class Agent:
             {"role": "system", "content": build_system_prompt(self.goal)},
             {"role": "user", "content": context},
         ]
-        response = _ollama_client.chat(model=self.model, messages=messages)
+        response = _ollama_client.chat(model=self.model, messages=messages, keep_alive=0)
         raw = response["message"]["content"].strip()
 
         # Strip markdown code fences if present

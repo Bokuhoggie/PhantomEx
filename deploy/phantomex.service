@@ -1,0 +1,18 @@
+[Unit]
+Description=PhantomEx AI Crypto Paper Trading
+After=network.target
+
+[Service]
+Type=simple
+User=timone
+WorkingDirectory=/home/timone/apps/PhantomEx/backend
+Environment="OLLAMA_HOST=http://localhost:8081"
+Environment="PHANTOMEX_PORT=8000"
+ExecStart=/home/timone/apps/PhantomEx/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

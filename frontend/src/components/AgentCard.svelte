@@ -11,9 +11,14 @@
   $: agentTrades = $trades.filter(t => t.agent_id === agent.id).slice(0, 5)
   $: pnlDiff = (portfolio.total_value || 0) - (agent.allowance || 0)
   $: pnlPct = fmt((pnlDiff / (agent.allowance || 1)) * 100)
+  $: inPositions = (agent.allowance || 0) - (portfolio.cash || 0)
 
   let trading = false
   let tradeFlash = false
+  let walletOpen = false
+  let depositAmount = ''
+  let depositing = false
+  let depositError = ''
 
   async function triggerTrade() {
     trading = true
@@ -37,6 +42,26 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mode: next }),
     })
+  }
+
+  async function deposit() {
+    const amount = parseFloat(depositAmount)
+    if (!amount || amount <= 0) { depositError = 'Enter a positive amount'; return }
+    depositing = true
+    depositError = ''
+    try {
+      const res = await fetch(`/api/agents/${agent.id}/deposit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount }),
+      })
+      if (!res.ok) throw new Error(await res.text())
+      depositAmount = ''
+    } catch(e) {
+      depositError = e.message
+    } finally {
+      depositing = false
+    }
   }
 
   function fmtTime(ts) {
@@ -98,6 +123,59 @@
       {/each}
     </div>
   {/if}
+
+  <!-- Wallet section -->
+  <div class="section">
+    <button class="section-toggle" on:click={() => walletOpen = !walletOpen}>
+      <span class="section-label">Wallet</span>
+      <span class="toggle-arrow">{walletOpen ? '▲' : '▼'}</span>
+    </button>
+
+    {#if walletOpen}
+      <div class="wallet-body">
+        <div class="wallet-row">
+          <span class="w-label">Starting Allowance</span>
+          <span class="w-value">${fmt(agent.allowance || 0)}</span>
+        </div>
+        <div class="wallet-row">
+          <span class="w-label">Cash Remaining</span>
+          <span class="w-value">${fmt(portfolio.cash || 0)}</span>
+        </div>
+        <div class="wallet-row">
+          <span class="w-label">In Positions</span>
+          <span class="w-value">${fmt(inPositions > 0 ? inPositions : 0)}</span>
+        </div>
+
+        {#if Object.keys(holdings).length > 0}
+          <div class="w-holdings-header">Holdings Detail</div>
+          {#each Object.entries(holdings) as [symbol, h]}
+            <div class="wallet-row">
+              <span class="w-label">{symbol} × {h.quantity.toFixed(6)}</span>
+              <span class="w-value w-subtle">avg ${fmt(h.avg_cost)}</span>
+            </div>
+          {/each}
+        {/if}
+
+        <div class="deposit-row">
+          <input
+            class="deposit-input"
+            type="number"
+            min="1"
+            step="100"
+            placeholder="Amount ($)"
+            bind:value={depositAmount}
+            on:keydown={e => e.key === 'Enter' && deposit()}
+          />
+          <button class="deposit-btn" on:click={deposit} disabled={depositing}>
+            {depositing ? '...' : '+ Deposit'}
+          </button>
+        </div>
+        {#if depositError}
+          <div class="deposit-error">{depositError}</div>
+        {/if}
+      </div>
+    {/if}
+  </div>
 
   <!-- Make Trade button -->
   <button class="trade-btn" on:click={triggerTrade} disabled={trading}>
@@ -167,8 +245,9 @@
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
-    min-width: 300px;
-    max-width: 360px;
+    min-width: 340px;
+    max-width: 480px;
+    width: 100%;
     transition: border-color 0.3s;
   }
   .agent-card.flash {
@@ -192,7 +271,7 @@
     font-size: 0.68rem;
     padding: 2px 6px;
     border-radius: 4px;
-    max-width: 90px;
+    max-width: 160px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -227,6 +306,82 @@
 
   .section { display: flex; flex-direction: column; gap: 0.3rem; }
   .section-label { font-size: 0.65rem; color: #444; text-transform: uppercase; letter-spacing: 0.05em; }
+
+  .section-toggle {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: none;
+    border: none;
+    cursor: pointer;
+    width: 100%;
+    padding: 0;
+    color: inherit;
+  }
+  .toggle-arrow { font-size: 0.55rem; color: #444; }
+
+  /* Wallet */
+  .wallet-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    background: #0d0d1a;
+    border: 1px solid #1e1e3a;
+    border-radius: 6px;
+    padding: 0.6rem 0.75rem;
+    margin-top: 0.1rem;
+  }
+  .wallet-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.78rem;
+  }
+  .w-label { color: #666; }
+  .w-value { color: #c0c0d0; font-family: monospace; }
+  .w-subtle { color: #555; }
+  .w-holdings-header {
+    font-size: 0.62rem;
+    color: #444;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-top: 0.3rem;
+    border-top: 1px solid #1e1e3a;
+    padding-top: 0.3rem;
+  }
+  .deposit-row {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.4rem;
+    border-top: 1px solid #1e1e3a;
+    padding-top: 0.4rem;
+  }
+  .deposit-input {
+    background: #1a1a30;
+    border: 1px solid #2e2e5a;
+    color: #e0e0ff;
+    padding: 4px 8px;
+    border-radius: 5px;
+    font-size: 0.78rem;
+    flex: 1;
+    outline: none;
+    min-width: 0;
+  }
+  .deposit-input:focus { border-color: #7060d0; }
+  .deposit-btn {
+    background: #0d2a1a;
+    color: #00d4a0;
+    border: 1px solid #00d4a0;
+    padding: 4px 10px;
+    border-radius: 5px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+  .deposit-btn:hover:not(:disabled) { background: #0a3a22; }
+  .deposit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .deposit-error { font-size: 0.72rem; color: #ff4d6d; }
 
   .holding-row { display: flex; gap: 0.6rem; font-size: 0.8rem; align-items: center; }
   .h-symbol { color: #888; width: 45px; font-weight: 600; }

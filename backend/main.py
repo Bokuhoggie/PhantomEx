@@ -245,6 +245,28 @@ async def set_agent_mode(agent_id: str, body: dict):
     return {"ok": True}
 
 
+class DepositRequest(BaseModel):
+    amount: float
+
+
+@app.post("/api/agents/{agent_id}/deposit")
+async def deposit_to_agent(agent_id: str, req: DepositRequest):
+    """Add fake cash to an agent's wallet."""
+    agent = agent_registry.get(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if req.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+    agent.portfolio.deposit(req.amount)
+    agent.allowance += req.amount  # keep in-memory allowance in sync for to_dict() P&L
+    prices = market_feed.get_prices()
+    await ws_manager.broadcast({
+        "type": "agent_state",
+        "data": {**agent.to_dict(), "portfolio": agent.portfolio.to_dict(prices)},
+    })
+    return {"ok": True, "new_cash": agent.portfolio.cash}
+
+
 @app.get("/api/market/prices")
 async def get_prices():
     return market_feed.get_prices()

@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+# ╔═══════════════════════════════════════════════╗
+# ║  PhantomEx CLI                                ║
+# ║  Usage: phantomex [command]                   ║
+# ╚═══════════════════════════════════════════════╝
+#
+# Commands:
+#   (no args) / start   Start the PhantomEx server
+#   stop                Stop the server
+#   restart             Restart the server
+#   status              Show running status
+#   build               Rebuild the frontend
+#   logs                Tail the server log
+#   server <cmd>        Manage the timone deployment
+#     server start|stop|restart|logs|status|deploy
+#
+# Install (run once):  ./install.sh
+# Env vars:
+#   PHANTOMEX_PORT         Port to listen on (default: 8000)
+#   PHANTOMEX_TIMONE_HOST  SSH host for server commands (default: timone)
+
+set -euo pipefail
+
+# ── Resolve absolute root regardless of symlink location ─────────────────────
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+# Dereference symlinks
+if command -v realpath &>/dev/null; then
+  SCRIPT_PATH="$(realpath "$SCRIPT_PATH")"
+fi
+ROOT="$(dirname "$(dirname "$SCRIPT_PATH")")"
+BACKEND="$ROOT/backend"
+FRONTEND="$ROOT/frontend"
+VENV="$ROOT/venv"
+PID_FILE="$ROOT/.phantomex.pid"
+LOG_FILE="$ROOT/phantomex.log"
+
+PORT="${PHANTOMEX_PORT:-8000}"
+TIMONE_HOST="${PHANTOMEX_TIMONE_HOST:-timone}"
+SSH_KEY="${HOME}/.ssh/id_ed25519"
+
+# ── Colors ────────────────────────────────────────────────────────────────────
+if [ -t 1 ]; then
+  GRN='\033[0;32m'; YEL='\033[1;33m'; CYN='\033[0;36m'; RED='\033[0;31m'
+  BLD='\033[1m'; RST='\033[0m'
+else
+  GRN=''; YEL=''; CYN=''; RED=''; BLD=''; RST=''
+fi
+
+log()  { echo -e "${CYN}◆ phantomex${RST} $*"; }
+ok()   { echo -e "${GRN}✓ phantomex${RST} $*"; }
+warn() { echo -e "${YEL}⚠ phantomex${RST} $*"; }
+err()  { echo -e "${RED}✗ phantomex${RST} $*" >&2; }
+bold() { echo -e "${BLD}$*${RST}"; }
+
+# ── Process helpers ───────────────────────────────────────────────────────────
+is_running() {
+  [[ -f "$PID_FILE" ]] || return 1
+  local pid
+  pid=$(cat "$PID_FILE" 2>/dev/null) || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+get_pid() {
+  cat "$PID_FILE" 2>/dev/null || echo "?"
+}
+
+# ── Environment setup ─────────────────────────────────────────────────────────
+ensure_venv() {
+  if [[ ! -d "$VENV" ]]; then
+    log "Creating Python virtual environment..."
+    python3 -m venv "$VENV"
+  fi
+  log "Checking Python dependencies..."
+  "$VENV/bin/pip" install -q -r "$BACKEND/requirements.txt"
+}
+
+ensure_frontend_deps() {
+  if [[ ! -d "$FRONTEND/node_modules" ]]; then
+    log "Installing frontend dependencies..."
+    npm --prefix "$FRONTEND" install --silent
+  fi
+}
+
+build_frontend() {
+  ensure_frontend_deps
+  log "Building frontend..."
+  npm --prefix "$FRONTEND" run build
+  ok "Frontend built → frontend/dist/"
+}
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+cmd_start() {
+  if is_running; then
+    warn "Already running (PID $(get_pid)) → http://localhost:$PORT"
+    return 0
+  fi
+
+  ensure_venv
+  ensure_frontend_deps
+
+  # Build frontend only if dist doesn't exist
+  if [[ ! -d "$FRONTEND/dist" ]]; then
+    log "No build found — building frontend first..."
+    build_frontend
+  fi
+
+  log "Starting PhantomEx..."
+  cd "$BACKEND"
+  nohup "$VENV/bin/uvicorn" main:app \
+    --host 0.0.0.0 \
+    --port "$PORT" \
+    >> "$LOG_FILE" 2>&1 &
+
+  local pid=$!
+  echo "$pid" > "$PID_FILE"
+
+  # Brief wait to catch immediate crash
+  sleep 1.5
+  if is_running; then
+    echo ""
+    ok "PhantomEx is running"
+    bold "  → http://localhost:$PORT"
+    echo ""
+    echo "  phantomex logs    — view server output"
+    echo "  phantomex stop    — stop the server"
+    echo ""
+  else
+    err "Failed to start — check logs:"
+    echo "  phantomex logs"
+    rm -f "$PID_FILE"
+    exit 1
+  fi
+}
+
+cmd_stop() {
+  if ! is_running; then
+    warn "Not running."
+    return 0
+  fi
+  local pid
+  pid=$(get_pid)
+  log "Stopping PhantomEx (PID $pid)..."
+  kill "$pid" 2>/dev/null || true
+  sleep 0.5
+  rm -f "$PID_FILE"
+  ok "Stopped."
+}
+
+cmd_restart() {
+  cmd_stop || true
+  sleep 1
+  cmd_start
+}
+
+cmd_status() {
+  if is_running; then
+    ok "Running  (PID $(get_pid))  → http://localhost:$PORT"
+  else
+    warn "Not running."
+  fi
+}
+
+cmd_build() {
+  build_frontend
+}
+
+cmd_logs() {
+  if [[ ! -f "$LOG_FILE" ]]; then
+    warn "No log file yet at $LOG_FILE"
+    warn "Start the server first: phantomex start"
+    exit 0
+  fi
+  log "Tailing $LOG_FILE  (Ctrl+C to exit)"
+  tail -f "$LOG_FILE"
+}
+
+# ── Server (timone) ───────────────────────────────────────────────────────────
+ssh_timone() {
+  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$TIMONE_HOST" "$@"
+}
+
+cmd_server() {
+  local sub="${1:-status}"
+  case "$sub" in
+    start)
+      log "Starting PhantomEx on $TIMONE_HOST..."
+      ssh_timone "sudo systemctl start phantomex"
+      ok "Started on $TIMONE_HOST"
+      ;;
+    stop)
+      log "Stopping PhantomEx on $TIMONE_HOST..."
+      ssh_timone "sudo systemctl stop phantomex"
+      ok "Stopped on $TIMONE_HOST"
+      ;;
+    restart)
+      log "Restarting PhantomEx on $TIMONE_HOST..."
+      ssh_timone "sudo systemctl restart phantomex"
+      ok "Restarted on $TIMONE_HOST"
+      ;;
+    status)
+      ssh_timone "systemctl status phantomex --no-pager" || true
+      ;;
+    logs)
+      log "Streaming logs from $TIMONE_HOST (Ctrl+C to exit)..."
+      ssh_timone "journalctl -u phantomex -f --no-pager"
+      ;;
+    deploy)
+      log "Deploying to $TIMONE_HOST..."
+      ssh_timone "
+        set -e
+        cd ~/apps/PhantomEx
+        git pull origin main
+        venv/bin/pip install -q -r backend/requirements.txt
+        npm --prefix frontend install --silent
+        npm --prefix frontend run build
+        sudo systemctl restart phantomex
+        echo 'Deploy complete.'
+      "
+      ok "Deployed and restarted on $TIMONE_HOST"
+      ;;
+    *)
+      err "Unknown server subcommand: $sub"
+      echo ""
+      echo "Usage: phantomex server [start|stop|restart|logs|status|deploy]"
+      exit 1
+      ;;
+  esac
+}
+
+# ── Help ──────────────────────────────────────────────────────────────────────
+cmd_help() {
+  echo ""
+  bold "PhantomEx — AI Crypto Paper Trading"
+  echo ""
+  echo "  phantomex               Start the server"
+  echo "  phantomex start         Start the server"
+  echo "  phantomex stop          Stop the server"
+  echo "  phantomex restart       Restart the server"
+  echo "  phantomex status        Show running status"
+  echo "  phantomex build         Rebuild frontend"
+  echo "  phantomex logs          Tail server log"
+  echo ""
+  echo "  phantomex server start   Start on timone (systemd)"
+  echo "  phantomex server stop    Stop on timone"
+  echo "  phantomex server restart Restart on timone"
+  echo "  phantomex server logs    Stream timone logs"
+  echo "  phantomex server status  Check timone status"
+  echo "  phantomex server deploy  git pull + rebuild + restart on timone"
+  echo ""
+  echo "  Env: PHANTOMEX_PORT (default 8000)"
+  echo "       PHANTOMEX_TIMONE_HOST (default timone)"
+  echo ""
+}
+
+# ── Dispatch ──────────────────────────────────────────────────────────────────
+CMD="${1:-start}"
+shift || true
+
+case "$CMD" in
+  start|up)     cmd_start ;;
+  stop|down)    cmd_stop ;;
+  restart)      cmd_restart ;;
+  status)       cmd_status ;;
+  build)        cmd_build ;;
+  logs|log)     cmd_logs ;;
+  server)       cmd_server "${1:-status}" ;;
+  help|--help|-h) cmd_help ;;
+  *)
+    err "Unknown command: $CMD"
+    cmd_help
+    exit 1
+    ;;
+esac

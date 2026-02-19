@@ -82,6 +82,17 @@ class Portfolio:
             }
         return pnl
 
+    def deposit(self, amount: float):
+        """Add fake cash to the portfolio. Bumps agents.allowance in DB so _load() stays consistent."""
+        if amount <= 0:
+            raise ValueError("Deposit amount must be positive")
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE agents SET allowance = allowance + ? WHERE id = ?",
+                (amount, self.agent_id),
+            )
+        self._cash += amount
+
     def execute_trade(
         self,
         symbol: str,
