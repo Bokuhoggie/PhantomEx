@@ -6,11 +6,12 @@
 
 import { writable, get } from 'svelte/store'
 
-export const connected = writable(false)
-export const prices = writable({})
-export const agents = writable({})   // agent_id -> agent state
-export const trades = writable([])   // recent trade log
-export const pendingDecisions = writable({}) // agent_id -> decision
+export const connected        = writable(false)
+export const prices           = writable({})
+export const agents           = writable({})          // agent_id -> agent state
+export const trades           = writable([])          // recent trade log (newest first)
+export const pendingDecisions = writable({})          // agent_id -> decision
+export const deploymentLog    = writable([])          // [{id, name, model, action, ts}]
 
 const WS_URL = `ws://${window.location.host}/ws`
 const RECONNECT_MS = 3000
@@ -35,20 +36,43 @@ function dispatch(msg) {
       prices.set(msg.data)
       break
 
-    case 'agent_state':
+    case 'agent_state': {
+      const prev = get(agents)
+      const isNew = !prev[msg.data.id]
       agents.update(a => ({ ...a, [msg.data.id]: msg.data }))
+      // Log deployment events
+      if (isNew) {
+        deploymentLog.update(log => [{
+          id: msg.data.id,
+          name: msg.data.name,
+          model: msg.data.model,
+          action: 'deployed',
+          ts: Date.now(),
+        }, ...log].slice(0, 100))
+      }
       break
+    }
 
     case 'agent_removed':
       agents.update(a => {
+        const removed = a[msg.agent_id]
         const next = { ...a }
         delete next[msg.agent_id]
+        if (removed) {
+          deploymentLog.update(log => [{
+            id: msg.agent_id,
+            name: removed.name || msg.agent_id.slice(0, 8),
+            model: removed.model || '',
+            action: 'removed',
+            ts: Date.now(),
+          }, ...log].slice(0, 100))
+        }
         return next
       })
       break
 
     case 'trade':
-      trades.update(t => [msg.data, ...t].slice(0, 200))
+      trades.update(t => [msg.data, ...t].slice(0, 500))
       break
 
     case 'portfolio':
@@ -124,6 +148,11 @@ export function rejectTrade(agentId) {
     delete next[agentId]
     return next
   })
+}
+
+/** Wipe local trade log display (does not delete from server DB) */
+export function wipeTradeLog() {
+  trades.set([])
 }
 
 export { on, send, connect }
