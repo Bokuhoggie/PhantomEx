@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+*.db
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.svelte-kit/
+
+# Data
+data/phantomex.db
+data/historical/*.json
+
+# Env
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db

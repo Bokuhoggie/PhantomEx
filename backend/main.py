@@ -1,0 +1,262 @@
+"""
+PhantomEx - FastAPI backend with WebSocket hub.
+Serves real-time market data, agent state, and trade events to connected clients.
+"""
+
+import asyncio
+import json
+import uuid
+from contextlib import asynccontextmanager
+from typing import Optional
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from core.db import init_db
+from core.market import MarketFeed, fetch_historical, DEFAULT_SYMBOLS
+from core.agent import AgentRegistry
+from core.portfolio import Portfolio
+
+
+# ── WebSocket connection manager ──────────────────────────────────────────────
+
+class ConnectionManager:
+    def __init__(self):
+        self.active: list[WebSocket] = []
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self.active.append(ws)
+
+    def disconnect(self, ws: WebSocket):
+        self.active.remove(ws)
+
+    async def broadcast(self, message: dict):
+        data = json.dumps(message)
+        dead = []
+        for ws in self.active:
+            try:
+                await ws.send_text(data)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.active.remove(ws)
+
+    async def send_to(self, ws: WebSocket, message: dict):
+        await ws.send_text(json.dumps(message))
+
+
+ws_manager = ConnectionManager()
+market_feed = MarketFeed(mode="live", interval=15.0)
+agent_registry = AgentRegistry()
+
+
+# ── Callbacks ─────────────────────────────────────────────────────────────────
+
+async def on_price_update(prices: dict):
+    await ws_manager.broadcast({"type": "prices", "data": prices})
+    # Trigger agent decision cycles
+    for agent in agent_registry.all():
+        asyncio.create_task(agent.run_once(prices))
+
+
+async def on_trade(agent_id: str, trade: dict):
+    await ws_manager.broadcast({"type": "trade", "agent_id": agent_id, "data": trade})
+    # Broadcast updated portfolio
+    agent = agent_registry.get(agent_id)
+    if agent:
+        portfolio_data = agent.portfolio.to_dict(market_feed.get_prices())
+        await ws_manager.broadcast({
+            "type": "portfolio",
+            "agent_id": agent_id,
+            "data": portfolio_data,
+        })
+
+
+async def on_decision(agent_id: str, decision: dict):
+    """Advisory mode: broadcast pending decision for human review."""
+    await ws_manager.broadcast({
+        "type": "pending_decision",
+        "agent_id": agent_id,
+        "data": decision,
+    })
+
+
+# ── App lifecycle ─────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    market_feed.subscribe(on_price_update)
+    asyncio.create_task(market_feed.start())
+    print("[phantomex] Server started.")
+    yield
+    await market_feed.stop()
+    print("[phantomex] Server stopped.")
+
+
+app = FastAPI(title="PhantomEx", version="0.1.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ── WebSocket endpoint ────────────────────────────────────────────────────────
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws_manager.connect(ws)
+    # Send current state on connect
+    prices = market_feed.get_prices()
+    if prices:
+        await ws_manager.send_to(ws, {"type": "prices", "data": prices})
+    for agent in agent_registry.all():
+        await ws_manager.send_to(ws, {
+            "type": "agent_state",
+            "data": {
+                **agent.to_dict(),
+                "portfolio": agent.portfolio.to_dict(prices),
+            },
+        })
+    try:
+        while True:
+            raw = await ws.receive_text()
+            msg = json.loads(raw)
+            await handle_ws_message(ws, msg)
+    except WebSocketDisconnect:
+        ws_manager.disconnect(ws)
+
+
+async def handle_ws_message(ws: WebSocket, msg: dict):
+    """Handle incoming messages from the browser over WebSocket."""
+    event = msg.get("type")
+
+    if event == "approve_trade":
+        agent_id = msg.get("agent_id")
+        agent = agent_registry.get(agent_id)
+        if agent:
+            await agent.approve_pending(market_feed.get_prices())
+
+    elif event == "reject_trade":
+        agent_id = msg.get("agent_id")
+        agent = agent_registry.get(agent_id)
+        if agent:
+            agent.reject_pending()
+
+    elif event == "ping":
+        await ws_manager.send_to(ws, {"type": "pong"})
+
+
+# ── REST API ──────────────────────────────────────────────────────────────────
+
+class CreateAgentRequest(BaseModel):
+    name: str
+    model: str
+    mode: str = "autonomous"
+    allowance: float = 10000.0
+
+
+@app.post("/api/agents")
+async def create_agent(req: CreateAgentRequest):
+    agent = agent_registry.create_agent(
+        name=req.name,
+        model=req.model,
+        mode=req.mode,
+        allowance=req.allowance,
+        on_trade=on_trade,
+        on_decision=on_decision,
+    )
+    prices = market_feed.get_prices()
+    data = {**agent.to_dict(), "portfolio": agent.portfolio.to_dict(prices)}
+    await ws_manager.broadcast({"type": "agent_state", "data": data})
+    return data
+
+
+@app.get("/api/agents")
+async def list_agents():
+    prices = market_feed.get_prices()
+    return [
+        {**a.to_dict(), "portfolio": a.portfolio.to_dict(prices)}
+        for a in agent_registry.all()
+    ]
+
+
+@app.delete("/api/agents/{agent_id}")
+async def delete_agent(agent_id: str):
+    agent = agent_registry.get(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    agent_registry.remove(agent_id)
+    await ws_manager.broadcast({"type": "agent_removed", "agent_id": agent_id})
+    return {"ok": True}
+
+
+@app.patch("/api/agents/{agent_id}/mode")
+async def set_agent_mode(agent_id: str, body: dict):
+    agent = agent_registry.get(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    mode = body.get("mode")
+    if mode not in ("autonomous", "advisory"):
+        raise HTTPException(status_code=400, detail="Invalid mode")
+    agent.mode = mode
+    await ws_manager.broadcast({"type": "agent_state", "data": agent.to_dict()})
+    return {"ok": True}
+
+
+@app.get("/api/market/prices")
+async def get_prices():
+    return market_feed.get_prices()
+
+
+@app.get("/api/market/history/{symbol}")
+async def get_history(symbol: str, days: int = 30):
+    try:
+        data = await fetch_historical(symbol.upper(), days)
+        return {"symbol": symbol.upper(), "data": data}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/api/market/symbols")
+async def get_symbols():
+    return DEFAULT_SYMBOLS
+
+
+@app.get("/api/trades")
+async def get_trades(agent_id: Optional[str] = None, limit: int = 100):
+    from core.db import get_db
+    with get_db() as conn:
+        if agent_id:
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE agent_id = ? ORDER BY timestamp DESC LIMIT ?",
+                (agent_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM trades ORDER BY timestamp DESC LIMIT ?", (limit,)
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/ollama/models")
+async def list_ollama_models():
+    """List available models from the local Ollama instance."""
+    try:
+        import ollama
+        models = ollama.list()
+        return [m["name"] for m in models.get("models", [])]
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Ollama error: {e}")
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "version": "0.1.0"}
