@@ -6,6 +6,7 @@ Supports autonomous mode (model decides) and advisory mode (human confirms).
 
 import asyncio
 import json
+import time
 import uuid
 from datetime import datetime
 from typing import Callable, Optional
@@ -37,7 +38,6 @@ Respond ONLY with a valid JSON object in this exact format:
 
 Rules:
 - quantity is the NUMBER OF COINS/TOKENS, not dollar amount. BTC costs ~$60000 each so 0.001 BTC = $60
-- Never spend more than 20% of your cash balance on a single trade
 - Never sell more than you own
 - If uncertain, prefer hold
 - quantity must be a positive number (can be fractional, e.g. 0.001)
@@ -45,12 +45,37 @@ Rules:
 {goal_section}"""
 
 
-def build_system_prompt(goal: str) -> str:
+RISK_INSTRUCTIONS = {
+    "aggressive": """Risk profile: AGGRESSIVE
+- Trade frequently — act on smaller signals, don't wait for certainty
+- You may spend up to 40% of your cash balance on a single trade
+- Prefer higher-volatility altcoins (SOL, AVAX, DOGE, MATIC, ADA) for bigger gains
+- Buy dips aggressively, ride momentum
+- Take profits quickly — hold positions for shorter periods
+- Maximise returns, accept higher risk""",
+
+    "neutral": """Risk profile: NEUTRAL
+- Standard approach: spend up to 20% of cash per trade
+- Balance between BTC/ETH and mid-cap altcoins
+- Hold for medium-term trends, act on clear signals""",
+
+    "safe": """Risk profile: SAFE
+- Trade conservatively — only act on very strong, clear signals
+- Never spend more than 10% of cash on a single trade
+- Stick to BTC and ETH only — avoid high-volatility altcoins
+- When uncertain, ALWAYS hold
+- Capital preservation is the priority over gains
+- Require stronger confirmation before entering any position""",
+}
+
+
+def build_system_prompt(goal: str, risk_profile: str = "neutral") -> str:
     if goal:
         goal_section = f"Your trading goal: {goal}"
     else:
         goal_section = "Your trading goal: Grow the portfolio value over time."
-    return BASE_SYSTEM_PROMPT.format(goal_section=goal_section)
+    risk_text = RISK_INSTRUCTIONS.get(risk_profile, RISK_INSTRUCTIONS["neutral"])
+    return BASE_SYSTEM_PROMPT.format(goal_section=goal_section + "\n\n" + risk_text)
 
 
 def build_market_context(prices: dict, portfolio: Portfolio) -> str:
@@ -86,6 +111,7 @@ class Agent:
         allowance: float = 10000.0,
         goal: str = "",
         trade_interval: float = 60.0,
+        risk_profile: str = "neutral",
         on_trade: Optional[Callable] = None,
         on_decision: Optional[Callable] = None,
         on_thought: Optional[Callable] = None,
@@ -97,6 +123,7 @@ class Agent:
         self.allowance = allowance
         self.goal = goal
         self.trade_interval = trade_interval  # seconds between think cycles
+        self.risk_profile = risk_profile      # "aggressive" | "neutral" | "safe"
         self._last_run_at: float = 0.0        # unix timestamp of last cycle
         self.on_trade = on_trade
         self.on_decision = on_decision
@@ -110,7 +137,7 @@ class Agent:
         """Ask the model what to do given current market conditions."""
         context = build_market_context(prices, self.portfolio)
         messages = [
-            {"role": "system", "content": build_system_prompt(self.goal)},
+            {"role": "system", "content": build_system_prompt(self.goal, self.risk_profile)},
             {"role": "user", "content": context},
         ]
         response = _ollama_client.chat(model=self.model, messages=messages, keep_alive=0)
@@ -129,25 +156,51 @@ class Agent:
         decision["timestamp"] = datetime.utcnow().isoformat()
         return decision
 
+    def _persist_hold(self, reasoning: str, timestamp: str):
+        """Write a HOLD think cycle to the trades table so it appears in the log."""
+        with get_db() as conn:
+            conn.execute(
+                """INSERT INTO trades (agent_id, symbol, side, quantity, price, total, reasoning, mode, timestamp)
+                   VALUES (?, ?, 'hold', 0, 0, 0, ?, 'paper', ?)""",
+                (self.agent_id, "", reasoning, timestamp),
+            )
+
     async def execute_decision(self, decision: dict, prices: dict) -> Optional[dict]:
         """Execute a trade decision. Returns trade record or None if hold."""
         action = decision.get("action", "hold").lower()
+        reasoning = decision.get("reasoning", "")
+        timestamp = decision.get("timestamp", datetime.utcnow().isoformat())
 
         # Store thought regardless of action
         self.last_thought = {
             "action": action,
             "symbol": decision.get("symbol", ""),
             "quantity": decision.get("quantity", 0),
-            "reasoning": decision.get("reasoning", ""),
-            "timestamp": decision.get("timestamp", datetime.utcnow().isoformat()),
+            "reasoning": reasoning,
+            "timestamp": timestamp,
         }
 
         if action == "hold":
+            # Persist hold to DB so it shows in trade log and survives page refresh
+            self._persist_hold(reasoning, timestamp)
+            # Emit as a trade event so the frontend log updates live
+            hold_record = {
+                "agent_id": self.agent_id,
+                "symbol": "",
+                "side": "hold",
+                "quantity": 0,
+                "price": 0,
+                "total": 0,
+                "reasoning": reasoning,
+                "mode": "paper",
+                "timestamp": timestamp,
+            }
+            if self.on_trade:
+                await self.on_trade(self.agent_id, hold_record)
             return None
 
         symbol = decision.get("symbol", "").upper()
         quantity = float(decision.get("quantity", 0))
-        reasoning = decision.get("reasoning", "")
         price = prices.get(symbol, {}).get("price")
 
         if not price or quantity <= 0 or not symbol:
@@ -171,7 +224,6 @@ class Agent:
 
     async def run_once(self, prices: dict):
         """Single decision cycle. Skips if trade_interval has not elapsed."""
-        import time
         if not prices:
             return
         if time.time() - self._last_run_at < self.trade_interval:
@@ -218,6 +270,7 @@ class Agent:
             "allowance": self.allowance,
             "goal": self.goal,
             "trade_interval": self.trade_interval,
+            "risk_profile": self.risk_profile,
             "running": self._running,
             "pending_decision": self._pending_decision,
             "last_thought": self.last_thought,
@@ -238,6 +291,7 @@ class AgentRegistry:
         allowance: float = 10000.0,
         goal: str = "",
         trade_interval: float = 60.0,
+        risk_profile: str = "neutral",
         on_trade=None,
         on_decision=None,
         on_thought=None,
@@ -245,8 +299,8 @@ class AgentRegistry:
         agent_id = str(uuid.uuid4())
         with get_db() as conn:
             conn.execute(
-                "INSERT INTO agents (id, name, model, mode, allowance, goal, trade_interval) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (agent_id, name, model, mode, allowance, goal, trade_interval),
+                "INSERT INTO agents (id, name, model, mode, allowance, goal, trade_interval, risk_profile) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (agent_id, name, model, mode, allowance, goal, trade_interval, risk_profile),
             )
         agent = Agent(
             agent_id=agent_id,
@@ -256,6 +310,7 @@ class AgentRegistry:
             allowance=allowance,
             goal=goal,
             trade_interval=trade_interval,
+            risk_profile=risk_profile,
             on_trade=on_trade,
             on_decision=on_decision,
             on_thought=on_thought,

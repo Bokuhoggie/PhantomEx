@@ -179,6 +179,7 @@ class CreateAgentRequest(BaseModel):
     allowance: float = 10000.0
     goal: str = ""
     trade_interval: float = 60.0            # seconds between think cycles
+    risk_profile: str = "neutral"           # "aggressive" | "neutral" | "safe"
     initial_holdings: dict[str, float] = {} # {symbol: quantity} — declared, not bought
 
 
@@ -191,6 +192,7 @@ async def create_agent(req: CreateAgentRequest):
         allowance=req.allowance,
         goal=req.goal,
         trade_interval=req.trade_interval,
+        risk_profile=req.risk_profile,
         on_trade=on_trade,
         on_decision=on_decision,
         on_thought=on_thought,
@@ -270,6 +272,27 @@ async def set_agent_mode(agent_id: str, body: dict):
     return {"ok": True}
 
 
+@app.patch("/api/agents/{agent_id}/risk")
+async def set_risk_profile(agent_id: str, body: dict):
+    """Change an agent's risk profile on the fly. Takes effect on the next think cycle."""
+    agent = agent_registry.get(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    profile = body.get("risk_profile")
+    if profile not in ("aggressive", "neutral", "safe"):
+        raise HTTPException(status_code=400, detail="Invalid risk profile")
+    agent.risk_profile = profile
+    from core.db import get_db
+    with get_db() as conn:
+        conn.execute("UPDATE agents SET risk_profile = ? WHERE id = ?", (profile, agent_id))
+    prices = market_feed.get_prices()
+    await ws_manager.broadcast({
+        "type": "agent_state",
+        "data": {**agent.to_dict(), "portfolio": agent.portfolio.to_dict(prices)},
+    })
+    return {"ok": True}
+
+
 class DepositRequest(BaseModel):
     amount: float
 
@@ -312,7 +335,7 @@ async def get_symbols():
 
 
 @app.get("/api/trades")
-async def get_trades(agent_id: Optional[str] = None, limit: int = 100):
+async def get_trades(agent_id: Optional[str] = None, limit: int = 1000):
     from core.db import get_db
     with get_db() as conn:
         if agent_id:

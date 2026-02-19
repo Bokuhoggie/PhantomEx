@@ -71,6 +71,7 @@
         <option value="all">All sides</option>
         <option value="buy">Buys</option>
         <option value="sell">Sells</option>
+        <option value="hold">Holds</option>
       </select>
 
       <!-- Toggle reasoning -->
@@ -100,16 +101,24 @@
     </div>
 
     {#each filtered as trade (trade.timestamp + trade.agent_id + trade.symbol)}
-      <div class="log-row" class:buy-row={trade.side === 'buy'} class:sell-row={trade.side === 'sell'}>
+      <div class="log-row"
+        class:buy-row={trade.side === 'buy'}
+        class:sell-row={trade.side === 'sell'}
+        class:hold-row={trade.side === 'hold'}
+      >
         <span class="col-time">{fmtTime(trade.timestamp)}</span>
         <span class="col-agent">{agentName(trade.agent_id)}</span>
-        <span class="col-side" class:buy={trade.side === 'buy'} class:sell={trade.side === 'sell'}>
+        <span class="col-side"
+          class:buy={trade.side === 'buy'}
+          class:sell={trade.side === 'sell'}
+          class:hold={trade.side === 'hold'}
+        >
           {trade.side.toUpperCase()}
         </span>
-        <span class="col-symbol">{trade.symbol}</span>
-        <span class="col-mono">{fmt(trade.quantity, 6)}</span>
-        <span class="col-mono">${fmt(trade.price)}</span>
-        <span class="col-mono">${fmt(trade.total)}</span>
+        <span class="col-symbol">{trade.side !== 'hold' ? trade.symbol : '—'}</span>
+        <span class="col-mono">{trade.side !== 'hold' ? fmt(trade.quantity, 6) : '—'}</span>
+        <span class="col-mono">{trade.side !== 'hold' ? '$' + fmt(trade.price) : '—'}</span>
+        <span class="col-mono">{trade.side !== 'hold' ? '$' + fmt(trade.total) : '—'}</span>
         {#if showReasoning}
           <span class="reason-col col-reason">{trade.reasoning || '—'}</span>
         {/if}
@@ -217,6 +226,7 @@
   .log-row:hover { background: #0f0f22; }
   .log-row.buy-row  { border-left: 2px solid rgba(0, 212, 160, 0.2); }
   .log-row.sell-row { border-left: 2px solid rgba(255, 77, 109, 0.2); }
+  .log-row.hold-row { border-left: 2px solid rgba(80, 80, 100, 0.15); opacity: 0.5; }
 
   .header-row {
     color: #3a3a5a;
@@ -238,6 +248,7 @@
   .col-side   { font-weight: 700; }
   .buy        { color: #00d4a0; }
   .sell       { color: #ff4d6d; }
+  .hold       { color: #444; font-style: italic; }
   .col-symbol { color: #a090d0; font-weight: 600; }
   .col-mono   { font-family: monospace; color: #c0c0d0; }
   .col-reason { font-size: 0.68rem; color: #555; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

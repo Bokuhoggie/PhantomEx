@@ -97,4 +97,6 @@ def init_db():
             conn.execute("ALTER TABLE agents ADD COLUMN goal TEXT NOT NULL DEFAULT ''")
         if "trade_interval" not in cols:
             conn.execute("ALTER TABLE agents ADD COLUMN trade_interval REAL NOT NULL DEFAULT 60.0")
+        if "risk_profile" not in cols:
+            conn.execute("ALTER TABLE agents ADD COLUMN risk_profile TEXT NOT NULL DEFAULT 'neutral'")
     print("[db] Database initialized.")

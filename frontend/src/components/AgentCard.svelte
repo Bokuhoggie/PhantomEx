@@ -29,13 +29,36 @@
   })()
   $: statusClass = thought?.action === 'buy' ? 'buy' : thought?.action === 'sell' ? 'sell' : 'hold'
 
-  let walletOpen = false
-  let logOpen    = false
-  let trading    = false
-  let tradeFlash = false
+  // ── In-browser thought history ───────────────────────────────────────────────
+  const MAX_THOUGHTS = 50
+  let thoughtHistory = []
+  let prevThoughtTs = null
+  $: if (thought?.timestamp && thought.timestamp !== prevThoughtTs) {
+    prevThoughtTs = thought.timestamp
+    thoughtHistory = [thought, ...thoughtHistory].slice(0, MAX_THOUGHTS)
+  }
+
+  // ── Panel state ──────────────────────────────────────────────────────────────
+  let walletOpen  = false
+  let logOpen     = false
+  let aiLogOpen   = false
+  let trading     = false
+  let tradeFlash  = false
   let depositAmount = ''
   let depositing    = false
   let depositError  = ''
+
+  // ── Risk profile live toggle ─────────────────────────────────────────────────
+  const RISK_CYCLE = ['aggressive', 'neutral', 'safe']
+  async function cycleRisk() {
+    const idx  = RISK_CYCLE.indexOf(agent.risk_profile)
+    const next = RISK_CYCLE[(idx + 1) % RISK_CYCLE.length]
+    await fetch(`/api/agents/${agent.id}/risk`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ risk_profile: next }),
+    })
+  }
 
   async function triggerTrade() {
     trading = true
@@ -93,6 +116,12 @@
     if (Math.abs(n) >= 1000) return (n / 1000).toFixed(1) + 'k'
     return fmt(n)
   }
+
+  function riskEmoji(r) {
+    if (r === 'aggressive') return '🔴'
+    if (r === 'safe')       return '🟢'
+    return '⚪'
+  }
 </script>
 
 <div class="agent-card" class:flash={tradeFlash} class:advisory={agent.mode === 'advisory'}>
@@ -107,6 +136,14 @@
           <span class="pill interval">⏱ {intervalLabel}</span>
         {/if}
         <button class="pill mode" on:click={toggleMode}>{agent.mode}</button>
+        <!-- Live risk toggle pill -->
+        {#if agent.risk_profile}
+          <button
+            class="pill risk {agent.risk_profile}"
+            on:click={cycleRisk}
+            title="Click to cycle risk profile"
+          >{riskEmoji(agent.risk_profile)} {agent.risk_profile}</button>
+        {/if}
       </div>
     </div>
     <div class="header-right">
@@ -142,7 +179,7 @@
       </span>
     </div>
     <div class="kpi">
-      <span class="kpi-label">Trades</span>
+      <span class="kpi-label">Actions</span>
       <span class="kpi-val">{agentTrades.length}</span>
     </div>
   </div>
@@ -211,6 +248,9 @@
     <button class="toggle-btn log-toggle" on:click={() => logOpen = !logOpen}>
       📋 Log ({agentTrades.length}) {logOpen ? '▲' : '▼'}
     </button>
+    <button class="toggle-btn ai-log-toggle" on:click={() => aiLogOpen = !aiLogOpen}>
+      🧠 AI ({thoughtHistory.length}) {aiLogOpen ? '▲' : '▼'}
+    </button>
   </div>
 
   <!-- ── Wallet Panel ── -->
@@ -246,20 +286,48 @@
   {#if logOpen}
     <div class="expandable log-body">
       {#if agentTrades.length === 0}
-        <div class="log-empty">No trades yet.</div>
+        <div class="log-empty">No actions yet.</div>
       {:else}
         {#each agentTrades as t}
-          <div class="log-trade">
+          <div class="log-trade" class:hold-row={t.side === 'hold'}>
             <span class="lt-side {t.side}">{t.side.toUpperCase()}</span>
-            <span class="lt-sym">{t.symbol}</span>
-            <span class="lt-qty">{fmt(t.quantity, 6)}</span>
-            <span class="lt-price">@ ${fmtCompact(t.price)}</span>
-            <span class="lt-total">${fmtCompact(t.total)}</span>
+            {#if t.side !== 'hold'}
+              <span class="lt-sym">{t.symbol}</span>
+              <span class="lt-qty">{fmt(t.quantity, 6)}</span>
+              <span class="lt-price">@ ${fmtCompact(t.price)}</span>
+              <span class="lt-total">${fmtCompact(t.total)}</span>
+            {:else}
+              <span class="lt-hold-spacer"></span>
+            {/if}
             <span class="lt-time">{fmtTime(t.timestamp)}</span>
           </div>
           {#if t.reasoning}
-            <div class="lt-reasoning">"{t.reasoning}"</div>
+            <div class="lt-reasoning" class:hold-reasoning={t.side === 'hold'}>"{t.reasoning}"</div>
           {/if}
+        {/each}
+      {/if}
+    </div>
+  {/if}
+
+  <!-- ── AI Thought Log Panel ── -->
+  {#if aiLogOpen}
+    <div class="expandable ai-log-body">
+      {#if thoughtHistory.length === 0}
+        <div class="log-empty">No think cycles recorded yet.</div>
+      {:else}
+        {#each thoughtHistory as th}
+          <div class="ai-entry">
+            <div class="ai-entry-header">
+              <span class="ai-action {th.action}">
+                {th.action.toUpperCase()}
+                {#if th.symbol && th.action !== 'hold'}
+                  <span class="ai-detail">{th.quantity} {th.symbol}</span>
+                {/if}
+              </span>
+              <span class="ai-time">{fmtTime(th.timestamp)}</span>
+            </div>
+            <div class="ai-reasoning">"{th.reasoning}"</div>
+          </div>
         {/each}
       {/if}
     </div>
@@ -303,6 +371,18 @@
   .pill.interval { background: #1a1430; color: #6050b0; border: 1px solid #2e2060; }
   .pill.mode     { background: #1e1a3a; color: #9070d0; border: 1px solid #3a2a6a; cursor: pointer; text-transform: capitalize; }
   .pill.mode:hover { background: #2e2a4a; }
+
+  /* Risk pill */
+  .pill.risk {
+    cursor: pointer;
+    font-weight: 600;
+    text-transform: capitalize;
+    transition: background 0.2s, border-color 0.2s, color 0.2s;
+  }
+  .pill.risk.aggressive { background: #2a1010; border: 1px solid #ff6a4d; color: #ff6a4d; }
+  .pill.risk.neutral    { background: #1e1e38; border: 1px solid #5a4a9a; color: #9080c0; }
+  .pill.risk.safe       { background: #0a2018; border: 1px solid #00d4a0; color: #00d4a0; }
+  .pill.risk:hover      { filter: brightness(1.2); }
 
   .status-dot {
     font-size: 0.63rem; font-weight: 600; padding: 2px 8px;
@@ -350,7 +430,7 @@
   .h-pnl  { font-family: monospace; font-size: 0.7rem; }
   .h-pnl-pct { font-size: 0.6rem; color: #666; }
 
-  /* Thought */
+  /* Latest thought block */
   .thought-block {
     background: #080816; border: 1px solid #1a1a30;
     border-left: 3px solid #3a2a6a; border-radius: 0 5px 5px 0;
@@ -362,7 +442,10 @@
   .thought-action.hold { color: #666; }
   .thought-detail { font-weight: 400; color: #888; }
   .thought-time   { margin-left: auto; font-size: 0.6rem; color: #444; font-weight: 400; }
-  .thought-reasoning { font-size: 0.7rem; color: #7070a0; font-style: italic; line-height: 1.35; }
+  .thought-reasoning {
+    font-size: 0.72rem; color: #7070a0; font-style: italic;
+    line-height: 1.4; white-space: pre-wrap; word-break: break-word;
+  }
 
   /* Pending */
   .pending-block {
@@ -390,7 +473,7 @@
   .btn-reject:hover { background: #2a1020; }
 
   /* Action Row */
-  .action-row { display: flex; gap: 0.4rem; }
+  .action-row { display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .trade-btn {
     background: #160c32; color: #a080ff; border: 1px solid #4a2a9a;
     padding: 0.42rem 0.75rem; border-radius: 6px; cursor: pointer;
@@ -403,10 +486,11 @@
     padding: 0.42rem 0.55rem; border-radius: 6px; cursor: pointer;
     font-size: 0.7rem; white-space: nowrap; transition: border-color 0.15s, color 0.15s;
   }
-  .wallet-toggle:hover { border-color: #3a2a6a; color: #a080ff; }
-  .log-toggle:hover    { border-color: #1a3a2a; color: #00d4a0; }
+  .wallet-toggle:hover  { border-color: #3a2a6a; color: #a080ff; }
+  .log-toggle:hover     { border-color: #1a3a2a; color: #00d4a0; }
+  .ai-log-toggle:hover  { border-color: #2a3a5a; color: #60a0e0; }
 
-  /* Expandable */
+  /* Expandable panels */
   .expandable {
     background: #070710; border: 1px solid #18182e;
     border-radius: 6px; padding: 0.6rem 0.7rem;
@@ -436,21 +520,49 @@
   .deposit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .deposit-err { font-size: 0.68rem; color: #ff4d6d; }
 
-  /* Log */
+  /* Trade Log Panel */
   .log-body { max-height: 280px; overflow-y: auto; gap: 0.1rem !important; }
   .log-empty { font-size: 0.7rem; color: #444; font-style: italic; }
-  .log-trade { display: flex; gap: 0.4rem; font-size: 0.68rem; align-items: center; padding: 0.1rem 0; }
+  .log-trade {
+    display: flex; gap: 0.4rem; font-size: 0.68rem;
+    align-items: center; padding: 0.1rem 0;
+  }
+  .log-trade.hold-row { opacity: 0.55; }
   .lt-side { font-weight: 700; width: 28px; }
   .lt-side.buy  { color: #00d4a0; }
   .lt-side.sell { color: #ff4d6d; }
+  .lt-side.hold { color: #444; font-style: italic; }
   .lt-sym   { color: #a090d0; width: 34px; font-weight: 600; }
   .lt-qty   { font-family: monospace; color: #c0c0d0; flex: 1; }
   .lt-price { font-family: monospace; color: #888; }
   .lt-total { font-family: monospace; color: #6a5aaa; font-size: 0.64rem; }
-  .lt-time  { color: #444; font-size: 0.6rem; }
+  .lt-time  { color: #444; font-size: 0.6rem; margin-left: auto; }
+  .lt-hold-spacer { flex: 1; }
   .lt-reasoning {
     font-size: 0.64rem; color: #4a4a6a; font-style: italic;
     padding: 0 0 0.2rem 0.5rem; border-left: 1px solid #28284a;
     margin: 0 0 0.1rem 2px; line-height: 1.3;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .lt-reasoning.hold-reasoning { color: #383848; border-left-color: #1e1e38; }
+
+  /* AI Thought Log Panel */
+  .ai-log-body { max-height: 320px; overflow-y: auto; gap: 0.35rem !important; }
+  .ai-entry {
+    border-left: 2px solid #1e2a3a; padding-left: 0.6rem;
+    display: flex; flex-direction: column; gap: 0.2rem;
+    padding-bottom: 0.3rem; border-bottom: 1px solid #10101e;
+  }
+  .ai-entry:last-child { border-bottom: none; }
+  .ai-entry-header { display: flex; align-items: center; gap: 0.5rem; }
+  .ai-action { font-size: 0.7rem; font-weight: 700; display: flex; align-items: center; gap: 0.4rem; }
+  .ai-action.buy  { color: #00d4a0; }
+  .ai-action.sell { color: #ff4d6d; }
+  .ai-action.hold { color: #445; font-style: normal; }
+  .ai-detail { font-weight: 400; color: #888; font-size: 0.65rem; }
+  .ai-time   { margin-left: auto; font-size: 0.58rem; color: #444; }
+  .ai-reasoning {
+    font-size: 0.68rem; color: #6a6a8a; font-style: italic;
+    line-height: 1.4; white-space: pre-wrap; word-break: break-word;
   }
 </style>

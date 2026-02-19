@@ -13,6 +13,9 @@
   let loading = false
   let error = ''
 
+  // Risk profile
+  let riskProfile = 'neutral'  // "aggressive" | "neutral" | "safe"
+
   // Trade frequency (slider in minutes, sent to backend as seconds)
   let tradeIntervalMin = 1
 
@@ -57,6 +60,7 @@
           allowance,
           goal,
           trade_interval: tradeIntervalMin * 60,
+          risk_profile: riskProfile,
           initial_holdings: initialHoldings,
         }),
       })
@@ -119,6 +123,31 @@
           Allowance ($)
           <input type="number" bind:value={allowance} min="100" step="100" />
         </label>
+      </div>
+
+      <!-- Risk Profile -->
+      <div class="risk-section">
+        <div class="risk-label">Risk Profile</div>
+        <div class="risk-toggle">
+          <button
+            type="button"
+            class="risk-btn aggressive"
+            class:active={riskProfile === 'aggressive'}
+            on:click={() => riskProfile = 'aggressive'}
+          >🔴 Aggressive</button>
+          <button
+            type="button"
+            class="risk-btn neutral"
+            class:active={riskProfile === 'neutral'}
+            on:click={() => riskProfile = 'neutral'}
+          >⚪ Neutral</button>
+          <button
+            type="button"
+            class="risk-btn safe"
+            class:active={riskProfile === 'safe'}
+            on:click={() => riskProfile = 'safe'}
+          >🟢 Safe</button>
+        </div>
       </div>
 
       <!-- Trade Frequency -->
@@ -276,6 +305,37 @@
     font-size: 0.82rem;
     text-transform: none;
   }
+
+  /* Risk Profile */
+  .risk-section { display: flex; flex-direction: column; gap: 0.4rem; }
+  .risk-label {
+    font-size: 0.78rem;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .risk-toggle {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 0.4rem;
+  }
+  .risk-btn {
+    padding: 0.45rem 0.5rem;
+    border-radius: 6px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid #2e2e5a;
+    background: #1a1a30;
+    color: #555;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    text-align: center;
+    white-space: nowrap;
+  }
+  .risk-btn:hover { border-color: #5a4a9a; color: #aaa; }
+  .risk-btn.aggressive.active  { background: #2a1010; border-color: #ff6a4d; color: #ff6a4d; }
+  .risk-btn.neutral.active     { background: #1e1e38; border-color: #7060d0; color: #a080ff; }
+  .risk-btn.safe.active        { background: #0a2018; border-color: #00d4a0; color: #00d4a0; }
 
   /* Trade Frequency */
   .freq-section { display: flex; flex-direction: column; }
