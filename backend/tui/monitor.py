@@ -1,28 +1,56 @@
 """
-PhantomEx TUI — full terminal monitor.
-Connects to the running PhantomEx WebSocket and displays live state.
+PhantomEx TUI — terminal monitor, no frameworks.
+Uses curses for raw terminal drawing + asyncio + websockets.
 
 Launch:  phantomex monitor
          python -m tui.monitor [ws://host:port/ws]
 
-Controls: ESC or Q to exit. No other inputs.
+Controls: Q or ESC to exit.
 """
 
 import asyncio
+import curses
 import json
 import subprocess
 import sys
 import time
-from datetime import datetime
+import threading
+from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
 import websockets
-from textual.app import App, ComposeResult
-from textual.binding import Binding
-from textual.widgets import Header, Footer, Static, Label
 
 
-WS_URL = "ws://localhost:8000/ws"
+WS_URL  = "ws://localhost:8000/ws"
+HTTP_URL = "http://localhost:8000"
+
+
+# ─── ANSI / curses color pairs ────────────────────────────────────────────────
+# Defined in init_colors():
+#   1 = green    2 = red     3 = cyan    4 = yellow
+#   5 = dim/grey 6 = white   7 = magenta 8 = header blue
+
+def init_colors():
+    curses.start_color()
+    curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_GREEN,   -1)
+    curses.init_pair(2, curses.COLOR_RED,     -1)
+    curses.init_pair(3, curses.COLOR_CYAN,    -1)
+    curses.init_pair(4, curses.COLOR_YELLOW,  -1)
+    curses.init_pair(5, 8,                    -1)  # dark grey (bright black)
+    curses.init_pair(6, curses.COLOR_WHITE,   -1)
+    curses.init_pair(7, curses.COLOR_MAGENTA, -1)
+    curses.init_pair(8, 12,                   -1)  # bright blue for headers
+
+GREEN  = lambda: curses.color_pair(1)
+RED    = lambda: curses.color_pair(2)
+CYAN   = lambda: curses.color_pair(3)
+YELLOW = lambda: curses.color_pair(4)
+DIM    = lambda: curses.color_pair(5)
+WHITE  = lambda: curses.color_pair(6)
+MAG    = lambda: curses.color_pair(7)
+BLUE   = lambda: curses.color_pair(8)
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -32,15 +60,15 @@ def _fmt_ts(ts: Optional[str]) -> str:
         return ""
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        return dt.astimezone().strftime("%I:%M:%S %p")
+        return dt.astimezone().strftime("%I:%M %p")
     except Exception:
-        return ts[:19]
+        return ts[:16]
 
 
 def _fmt_dur(secs: float) -> str:
     secs = int(secs)
     h, rem = divmod(secs, 3600)
-    m, s = divmod(rem, 60)
+    m, s   = divmod(rem, 60)
     if h:
         return f"{h}h {m:02d}m"
     if m:
@@ -48,55 +76,20 @@ def _fmt_dur(secs: float) -> str:
     return f"{s}s"
 
 
-def _compact(n: float, prefix: str = "$") -> str:
+def _compact(n: float) -> str:
     if abs(n) >= 1_000_000:
-        return f"{prefix}{n/1_000_000:.2f}M"
+        return f"${n/1_000_000:.2f}M"
     if abs(n) >= 1_000:
-        return f"{prefix}{n/1_000:.1f}k"
-    return f"{prefix}{n:,.2f}"
+        return f"${n/1_000:.1f}k"
+    return f"${n:,.2f}"
 
 
-def _bar(val: float, lo: float, hi: float, width: int = 12) -> str:
-    """Render an ASCII progress bar."""
-    pct = max(0.0, min(1.0, (val - lo) / (hi - lo) if hi > lo else 0))
-    filled = round(pct * width)
-    return "█" * filled + "░" * (width - filled)
-
-
-def _temp_color(t: float) -> str:
-    if t < 50:  return "green"
-    if t < 75:  return "yellow"
-    return "red"
-
-
-def _fan_color(f: float) -> str:
-    if f < 30:  return "cyan"
-    if f < 70:  return "yellow"
-    return "red"
-
-
-def _pnl_color(v: float) -> str:
-    return "green" if v >= 0 else "red"
-
-
-def _side_color(side: str) -> str:
-    return {"buy": "green", "sell": "red", "hold": "dim"}.get(side, "white")
-
-
-# ─── GPU polling ─────────────────────────────────────────────────────────────
-
-def query_gpus() -> list:
-    """
-    Returns list of dicts with keys: index, name, temp, fan, util
-    Returns [] if nvidia-smi is not available.
-    """
+def _query_gpus() -> list:
     try:
         out = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=index,name,temperature.gpu,fan.speed,utilization.gpu",
-                "--format=csv,noheader,nounits",
-            ],
+            ["nvidia-smi",
+             "--query-gpu=index,name,temperature.gpu,fan.speed,utilization.gpu",
+             "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=4,
         )
         if out.returncode != 0:
@@ -106,424 +99,450 @@ def query_gpus() -> list:
             parts = [p.strip() for p in line.split(",")]
             if len(parts) < 5:
                 continue
-
-            def safe_float(s):
-                try:
-                    return float(s)
-                except (ValueError, TypeError):
-                    return None
-
-            gpus.append({
-                "index": int(parts[0]),
-                "name":  parts[1],
-                "temp":  safe_float(parts[2]),
-                "fan":   safe_float(parts[3]),
-                "util":  safe_float(parts[4]),
-            })
+            def sf(s):
+                try: return float(s)
+                except: return None
+            gpus.append({"index": int(parts[0]), "name": parts[1],
+                         "temp": sf(parts[2]), "fan": sf(parts[3]), "util": sf(parts[4])})
         return gpus
     except Exception:
         return []
 
 
-# ─── Widgets ─────────────────────────────────────────────────────────────────
-
-class TickerBar(Static):
-    """Single-line price ticker."""
-    _prices: dict = {}
-
-    def render(self) -> str:
-        if not self._prices:
-            return "[dim]  Waiting for market data…[/]"
-        parts = []
-        for sym, data in self._prices.items():
-            price = data.get("price", 0)
-            chg   = data.get("change_24h", 0)
-            arrow = "▲" if chg >= 0 else "▼"
-            color = "green" if chg >= 0 else "red"
-            parts.append(
-                f"[bold white]{sym}[/] [white]${price:,.2f}[/] "
-                f"[{color}]{arrow}{abs(chg):.2f}%[/]"
-            )
-        return "   ".join(parts) + "   [dim]● LIVE[/]"
-
-    def refresh_ticker(self, prices: dict) -> None:
-        self._prices = prices
-        self.refresh()
+def _bar(val, width=10):
+    pct = max(0.0, min(1.0, val / 100.0))
+    f = round(pct * width)
+    return "█" * f + "░" * (width - f)
 
 
-class GpuPanel(Static):
-    """One row per GPU showing temp + fan bar."""
+# ─── safe addstr ─────────────────────────────────────────────────────────────
 
-    def compose(self) -> ComposeResult:
-        yield Label("[bold dim]── GPU STATUS ──────────────────────────────────────────────────────────────[/]")
-        yield Static(id="gpu-body")
+def _put(win, y, x, text, attr=0):
+    """Write text clipped to window width, ignore out-of-bounds."""
+    h, w = win.getmaxyx()
+    if y < 0 or y >= h - 1 or x >= w:
+        return
+    avail = w - x - 1
+    if avail <= 0:
+        return
+    try:
+        win.addstr(y, x, str(text)[:avail], attr)
+    except curses.error:
+        pass
 
-    def on_mount(self) -> None:
-        self._body = self.query_one("#gpu-body")
-        self._body.update("[dim]  Polling GPU…[/]")
 
-    def refresh_gpus(self, gpus: list) -> None:
-        body = self._body
-        if not gpus:
-            body.update("[dim]  nvidia-smi not available — GPU monitoring disabled[/]")
-            return
-        lines = []
-        for g in gpus:
-            name = g["name"].replace("NVIDIA GeForce ", "").replace("NVIDIA ", "")
+def _hline(win, y, attr=0):
+    h, w = win.getmaxyx()
+    if y < 0 or y >= h - 1:
+        return
+    try:
+        win.hline(y, 0, "─", w, attr)
+    except curses.error:
+        pass
+
+
+# ─── draw functions ───────────────────────────────────────────────────────────
+
+def draw_header(win, prices: dict, connected: bool):
+    h, w = win.getmaxyx()
+    win.erase()
+
+    # Title
+    _put(win, 0, 0, " ⚡ PhantomEx Monitor", curses.A_BOLD | MAG())
+    # Clock
+    clock = datetime.now().strftime("%I:%M:%S %p %Z")
+    _put(win, 0, w - len(clock) - 2, clock, DIM())
+    # Status dot
+    status = "● LIVE" if connected else "○ ---"
+    sc = GREEN() if connected else RED()
+    _put(win, 0, w - len(clock) - len(status) - 4, status, sc | curses.A_BOLD)
+
+    # Price ticker on row 1
+    x = 1
+    for sym, data in list(prices.items())[:8]:
+        price = data.get("price", 0)
+        chg   = data.get("change_24h", 0)
+        arrow = "▲" if chg >= 0 else "▼"
+        col   = GREEN() if chg >= 0 else RED()
+        part  = f" {sym} ${price:,.0f} "
+        _put(win, 1, x, part, curses.A_BOLD | WHITE())
+        x += len(part)
+        pct = f"{arrow}{abs(chg):.1f}%  "
+        _put(win, 1, x, pct, col)
+        x += len(pct)
+        if x > w - 20:
+            break
+
+    _hline(win, 2, DIM())
+    win.noutrefresh()
+
+
+def draw_gpus(win, gpus: list):
+    win.erase()
+    _put(win, 0, 0, " GPU STATUS", DIM() | curses.A_BOLD)
+
+    if not gpus:
+        _put(win, 1, 2, "nvidia-smi not available", DIM())
+    else:
+        for i, g in enumerate(gpus):
+            row = i + 1
+            name = g["name"].replace("NVIDIA GeForce ", "").replace("NVIDIA ", "")[:18]
             temp = g["temp"]
             fan  = g["fan"]
             util = g["util"]
-            tc = _temp_color(temp) if temp is not None else "dim"
-            fc = _fan_color(fan)   if fan  is not None else "dim"
-            t_str = f"[{tc}]{temp:.0f}°C[/]"  if temp is not None else "[dim]--°C[/]"
-            f_str = f"[{fc}]{fan:.0f}%[/]"    if fan  is not None else "[dim]--%[/]"
-            u_str = f"[white]{util:.0f}%[/]"  if util is not None else "[dim]--%[/]"
-            t_bar = f"[{tc}]{_bar(temp or 0, 0, 100)}[/]" if temp is not None else "[dim]" + "░"*12 + "[/]"
-            f_bar = f"[{fc}]{_bar(fan  or 0, 0, 100)}[/]" if fan  is not None else "[dim]" + "░"*12 + "[/]"
-            lines.append(
-                f"  [bold]GPU {g['index']}[/] [dim]{name:<20}[/]  "
-                f"Temp {t_str} {t_bar}  "
-                f"Fan {f_str} {f_bar}  "
-                f"Load {u_str}"
-            )
-        body.update("\n".join(lines))
+
+            tc = GREEN() if (temp or 0) < 50 else YELLOW() if (temp or 0) < 75 else RED()
+            fc = CYAN()  if (fan  or 0) < 30 else YELLOW() if (fan  or 0) < 70 else RED()
+
+            x = 2
+            _put(win, row, x, f"GPU{g['index']} {name:<18}", curses.A_BOLD | WHITE())
+            x += 24
+            t_str = f"{temp:.0f}°C" if temp is not None else "--°C"
+            _put(win, row, x, f"Temp ", DIM())
+            _put(win, row, x+5, f"{t_str} ", tc | curses.A_BOLD)
+            _put(win, row, x+10, _bar(temp or 0), tc)
+            x += 22
+            f_str = f"{fan:.0f}%" if fan is not None else "--%"
+            _put(win, row, x, f"Fan ", DIM())
+            _put(win, row, x+4, f"{f_str} ", fc | curses.A_BOLD)
+            _put(win, row, x+9, _bar(fan or 0), fc)
+            x += 21
+            u_str = f"{util:.0f}%" if util is not None else "--%"
+            _put(win, row, x, f"Load ", DIM())
+            _put(win, row, x+5, u_str, WHITE() | curses.A_BOLD)
+
+    _hline(win, len(gpus) + 1 if gpus else 2, DIM())
+    win.noutrefresh()
 
 
-class AgentPanel(Static):
-    """Live agent list — rich display matching the web UI."""
+def draw_agents(win, agents: dict, prices: dict):
+    win.erase()
+    h, w = win.getmaxyx()
+    _put(win, 0, 0, " ACTIVE AGENTS", DIM() | curses.A_BOLD)
 
-    def compose(self) -> ComposeResult:
-        yield Label("[bold dim]── ACTIVE AGENTS ───────────────────────────────────────────────────────────[/]")
-        yield Static(id="agent-body")
+    if not agents:
+        _put(win, 2, 2, "No agents deployed — visit the web UI to deploy one.", DIM())
+        win.noutrefresh()
+        return
 
-    def on_mount(self) -> None:
-        self._body = self.query_one("#agent-body")
-        self._body.update("[dim]  Connecting…[/]")
+    row = 1
+    now = time.time()
+    for a in agents.values():
+        if row >= h - 2:
+            break
+        port    = a.get("portfolio", {})
+        tv      = port.get("total_value", 0)
+        cash    = port.get("cash", 0)
+        allow   = a.get("allowance", 0)
+        pnl     = tv - allow
+        ppc     = (pnl / allow * 100) if allow else 0
+        risk    = a.get("risk_profile", "neutral")
+        running = a.get("running", True)
+        started = a.get("started_at")
+        max_dur = a.get("max_duration")
 
-    def refresh_agents(self, agents: dict) -> None:
-        body = getattr(self, "_body", None)
-        if body is None:
-            return  # not mounted yet — _ws_loop will retry via WS events
-        if not agents:
-            body.update("[dim]  No agents deployed — visit the web UI to deploy one.[/]")
-            return
-        self._draw(agents)
+        pc = GREEN() if pnl >= 0 else RED()
+        sc = GREEN() if running else DIM()
+        dot = "●" if running else "○"
 
-    def _draw(self, agents: dict) -> None:
-        body = self._body
-        lines = []
-        now = time.time()
+        # ── Row 1: name + meta ────────────────────────────────────────────
+        _put(win, row, 1, dot, sc | curses.A_BOLD)
+        _put(win, row, 3, a.get("name", "?"), curses.A_BOLD | WHITE())
+        model = a.get("model", "").split(":")[0]
+        x = 3 + len(a.get("name", "?")) + 1
+        _put(win, row, x, f" {model}", DIM())
+        x += len(model) + 2
 
-        for a in agents.values():
-            port    = a.get("portfolio", {})
-            tv      = port.get("total_value", 0)
-            cash    = port.get("cash", 0)
-            allow   = a.get("allowance", 0)
-            pnl     = tv - allow
-            ppc     = (pnl / allow * 100) if allow else 0
-            pc      = _pnl_color(pnl)
-            risk    = a.get("risk_profile", "neutral")
-            risk_ic = {"aggressive": "🔴", "safe": "🟢", "neutral": "⚪"}.get(risk, "⚪")
-            running = a.get("running", True)
-            started = a.get("started_at")
-            max_dur = a.get("max_duration")
+        risk_col = RED() if risk == "aggressive" else GREEN() if risk == "safe" else YELLOW()
+        _put(win, row, x, f" [{risk}]", risk_col)
+        x += len(risk) + 3
 
-            status = "[green]●[/]" if running else "[dim]○[/]"
+        if started:
+            elapsed = now - started
+            if max_dur:
+                pct = elapsed / max_dur
+                tc = RED() if pct > 0.75 else YELLOW() if pct > 0.5 else DIM()
+                _put(win, row, x, f" ⏱ {_fmt_dur(elapsed)}/{_fmt_dur(max_dur)}", tc)
+            else:
+                _put(win, row, x, f" ⏱ {_fmt_dur(elapsed)}", DIM())
+        row += 1
+        if row >= h - 2:
+            break
 
-            # Timer pill
-            timer_str = ""
-            if started:
-                elapsed = now - started
-                if max_dur:
-                    pct = elapsed / max_dur
-                    col = "red" if pct > 0.75 else "yellow" if pct > 0.5 else "white"
-                    timer_str = f"  [dim]⏱[/] [{col}]{_fmt_dur(elapsed)} / {_fmt_dur(max_dur)}[/]"
-                else:
-                    timer_str = f"  [dim]⏱ {_fmt_dur(elapsed)}[/]"
+        # ── Row 2: portfolio stats ────────────────────────────────────────
+        _put(win, row, 4, "Portfolio ", DIM())
+        _put(win, row, 14, _compact(tv), WHITE() | curses.A_BOLD)
+        x = 14 + len(_compact(tv)) + 2
+        _put(win, row, x, "Cash ", DIM())
+        x += 5
+        _put(win, row, x, _compact(cash), WHITE())
+        x += len(_compact(cash)) + 2
+        _put(win, row, x, "P&L ", DIM())
+        x += 4
+        pnl_str = f"{'+' if pnl>=0 else ''}{_compact(pnl)}  ({'+' if ppc>=0 else ''}{ppc:.1f}%)"
+        _put(win, row, x, pnl_str, pc | curses.A_BOLD)
+        row += 1
+        if row >= h - 2:
+            break
 
-            # ── Holdings with live USD value ──────────────────────────────
-            holdings = port.get("holdings", {})
-            prices_snap = getattr(self.app, "_prices", {})
-            hold_parts = []
-            total_deployed = 0.0
-            for sym, h in holdings.items():
-                qty = h.get("quantity", 0)
-                avg = h.get("avg_cost", 0)
-                live_price = prices_snap.get(sym, {}).get("price", avg)
-                pos_val  = qty * live_price
+        # ── Row 3: holdings ───────────────────────────────────────────────
+        holdings = port.get("holdings", {})
+        if holdings:
+            _put(win, row, 4, "Holdings ", DIM())
+            x = 13
+            for sym, h in list(holdings.items())[:6]:
+                qty      = h.get("quantity", 0)
+                avg      = h.get("avg_cost", 0)
+                lp       = prices.get(sym, {}).get("price", avg)
+                pos_val  = qty * lp
                 cost_val = qty * avg
                 upnl     = pos_val - cost_val
                 upnl_pct = (upnl / cost_val * 100) if cost_val else 0
-                total_deployed += pos_val
-                uc = "green" if upnl >= 0 else "red"
-                sign = "+" if upnl >= 0 else ""
-                hold_parts.append(
-                    f"[cyan]{sym}[/] [white]{qty:.4g}[/] "
-                    f"[dim]≈[/][white]{_compact(pos_val)}[/] "
-                    f"[{uc}]{sign}{upnl_pct:.1f}%[/]"
-                )
+                uc       = GREEN() if upnl >= 0 else RED()
+                sign     = "+" if upnl >= 0 else ""
+                chunk    = f"{sym} {qty:.4g} ≈{_compact(pos_val)} {sign}{upnl_pct:.1f}%   "
+                if x + len(chunk) > w - 2:
+                    break
+                _put(win, row, x, sym + " ", CYAN() | curses.A_BOLD)
+                _put(win, row, x + len(sym) + 1, f"{qty:.4g} ", WHITE())
+                _put(win, row, x + len(sym) + len(f"{qty:.4g}") + 2, f"≈{_compact(pos_val)} ", DIM())
+                pct_str  = f"{sign}{upnl_pct:.1f}%   "
+                _put(win, row, x + len(sym) + len(f"{qty:.4g}") + 2 + len(f"≈{_compact(pos_val)} "), pct_str, uc)
+                x += len(chunk)
+            row += 1
+            if row >= h - 2:
+                break
 
-            hold_str = "  [dim]|[/]  ".join(hold_parts) if hold_parts else "[dim]no holdings[/]"
+        # ── Row 4: last thought ───────────────────────────────────────────
+        thought = a.get("last_thought")
+        if thought:
+            act  = thought.get("action", "hold")
+            ac   = GREEN() if act == "buy" else RED() if act == "sell" else DIM()
+            sym_q = ""
+            if thought.get("symbol") and act != "hold":
+                sym_q = f" {thought['symbol']} ×{thought.get('quantity','')}"
+            ts_str = _fmt_ts(thought.get("timestamp"))
+            rsn    = (thought.get("reasoning") or "").strip()
+            avail  = w - 6
+            rsn    = rsn[:avail] + ("…" if len(rsn) > avail else "")
 
-            # ── P&L row ───────────────────────────────────────────────────
-            pnl_str = (
-                f"[{pc}]{'+' if pnl>=0 else ''}{_compact(pnl, '')}[/] "
-                f"[dim]([/][{pc}]{'+' if ppc>=0 else ''}{ppc:.1f}%[/][dim])[/]"
-            )
+            _put(win, row, 4, "└ ", DIM())
+            _put(win, row, 6, act.upper(), ac | curses.A_BOLD)
+            x = 6 + len(act)
+            _put(win, row, x, sym_q, WHITE())
+            x += len(sym_q)
+            _put(win, row, x, f"  {ts_str}", DIM())
+            row += 1
+            if row < h - 2 and rsn:
+                _put(win, row, 6, rsn, DIM())
+                row += 1
+        else:
+            _put(win, row, 4, "└ idle", DIM())
+            row += 1
 
-            # ── Last thought / decision ───────────────────────────────────
-            thought = a.get("last_thought")
-            if thought:
-                act    = thought.get("action", "hold")
-                act_uc = act.upper()
-                act_c  = _side_color(act)
-                sym_q  = ""
-                if thought.get("symbol") and act != "hold":
-                    qty_t = thought.get("quantity", "")
-                    sym_q = f" [white]{thought['symbol']}[/] [dim]×[/][white]{qty_t}[/]"
-                ts_str = _fmt_ts(thought.get("timestamp"))
-                rsn    = (thought.get("reasoning") or "").strip()
-                # Wrap reasoning at ~80 chars
-                if len(rsn) > 80:
-                    rsn_display = rsn[:80] + "[dim]…[/]"
-                else:
-                    rsn_display = rsn
+        # spacer between agents
+        row += 1
 
-                thought_block = (
-                    f"     [dim]└ Action:[/] [{act_c}]{act_uc}[/]{sym_q}  [dim]{ts_str}[/]\n"
-                    f"       [dim italic]{rsn_display}[/]"
-                )
-            else:
-                thought_block = "     [dim]└ idle — waiting for first decision[/]"
-
-            # ── Assemble agent block ──────────────────────────────────────
-            lines.append(
-                f"\n  {status} [bold white]{a['name']}[/]"
-                f"  [dim]{a.get('model', '').split(':')[0]}[/]"
-                f"  {risk_ic} [dim]{risk}[/]{timer_str}"
-            )
-            lines.append(
-                f"     [dim]Portfolio[/] [white]{_compact(tv)}[/]  "
-                f"[dim]Cash[/] [white]{_compact(cash)}[/]  "
-                f"[dim]P&L[/] {pnl_str}  "
-                f"[dim]Allowance[/] [white]{_compact(allow)}[/]"
-            )
-            if hold_parts:
-                lines.append(f"     [dim]Holdings:[/]  {hold_str}")
-            lines.append(thought_block)
-            lines.append("")  # spacing between agents
-
-        body.update("\n".join(lines))
+    _hline(win, h - 1, DIM())
+    win.noutrefresh()
 
 
-class TradePanel(Static):
-    """Last 20 trades, newest first."""
+def draw_trades(win, trades: list):
+    win.erase()
+    h, w = win.getmaxyx()
+    _put(win, 0, 0, " RECENT TRADES", DIM() | curses.A_BOLD)
 
-    def compose(self) -> ComposeResult:
-        yield Label("[bold dim]── RECENT TRADES ───────────────────────────────────────────────────────────[/]")
-        yield Static(id="trade-body")
+    shown = [t for t in trades if t.get("side") != "hold"][:h - 2]
+    if not shown:
+        _put(win, 1, 2, "No trades yet.", DIM())
+        win.noutrefresh()
+        return
 
-    def on_mount(self) -> None:
-        self._body = self.query_one("#trade-body")
-        self._body.update("[dim]  Loading…[/]")
+    row = 1
+    for t in shown:
+        if row >= h - 1:
+            break
+        side  = t.get("side", "hold")
+        sc    = GREEN() if side == "buy" else RED()
+        sym   = t.get("symbol") or "—"
+        qty   = t.get("quantity", 0)
+        price = t.get("price", 0)
+        total = t.get("total", 0)
+        ts    = _fmt_ts(t.get("timestamp"))
+        agent = (t.get("agent_name") or t.get("agent_id","?"))[:12]
 
-    def refresh_trades(self, trades: list) -> None:
-        if not getattr(self, "_body", None):
-            return
-        self._draw(trades)
+        _put(win, row, 1, f"{ts:<10}", DIM())
+        _put(win, row, 12, f"{agent:<13}", WHITE())
+        _put(win, row, 26, f"{side.upper():<5}", sc | curses.A_BOLD)
+        _put(win, row, 32, f"{sym:<5}", CYAN() | curses.A_BOLD)
+        _put(win, row, 38, f"{qty:.4f}", WHITE())
+        _put(win, row, 48, f"@ ${price:,.2f}", DIM())
+        _put(win, row, 62, f"= {_compact(total)}", WHITE())
+        row += 1
 
-    def _draw(self, trades: list) -> None:
-        body = self._body
-        if not trades:
-            body.update("[dim]  No trades yet.[/]")
-            return
-        lines = []
-        shown = [t for t in trades if t.get("side") != "hold"][:15]
-        holds = [t for t in trades if t.get("side") == "hold"]
-        for t in shown:
-            side  = t.get("side", "hold")
-            sc    = _side_color(side)
-            sym   = t.get("symbol") or "—"
-            qty   = t.get("quantity", 0)
-            price = t.get("price", 0)
-            total = t.get("total", 0)
-            ts    = _fmt_ts(t.get("timestamp"))
-            agent = (t.get("agent_name") or t.get("agent_id", "?"))[:14]
-            rsn   = (t.get("reasoning") or "").strip()[:60]
-            lines.append(
-                f"  [dim]{ts}[/]  [white]{agent:<14}[/]  [{sc}]{side.upper():<4}[/]  "
-                f"[cyan]{sym:<5}[/] [white]{qty:.4f}[/]  "
-                f"[dim]@[/] [white]${price:,.2f}[/]  "
-                f"[dim]=[/] [white]{_compact(total)}[/]"
-            )
-            if rsn:
-                lines.append(f"     [dim italic]{rsn}[/]")
-        # Holds summary
-        if holds:
-            lines.append(f"\n  [dim]+ {len(holds)} hold decision{'s' if len(holds)>1 else ''} (hidden)[/]")
-        body.update("\n".join(lines))
+    win.noutrefresh()
 
 
-# ─── App ─────────────────────────────────────────────────────────────────────
+# ─── main monitor loop ────────────────────────────────────────────────────────
 
-class PhantomExMonitor(App):
-    """PhantomEx terminal monitor. Press Q or ESC to exit."""
+class State:
+    def __init__(self):
+        self.prices:      dict  = {}
+        self.agents:      dict  = {}
+        self.agent_names: dict  = {}
+        self.trades:      list  = []
+        self.gpus:        list  = []
+        self.connected:   bool  = False
+        self.lock = threading.Lock()
 
-    CSS = """
-    Screen {
-        background: #030308;
-        layout: vertical;
-    }
-    TickerBar {
-        height: 1;
-        background: #0a0a1a;
-        border-bottom: solid #1a1a3a;
-        padding: 0 1;
-        content-align: left middle;
-    }
-    GpuPanel {
-        height: auto;
-        min-height: 4;
-        background: #06060f;
-        border-bottom: solid #1a1a3a;
-        padding: 0 1 1 1;
-    }
-    AgentPanel {
-        height: 1fr;
-        background: #08080f;
-        border-bottom: solid #1a1a3a;
-        padding: 0 1;
-        overflow-y: auto;
-    }
-    TradePanel {
-        height: 14;
-        background: #06060f;
-        padding: 0 1 1 1;
-        overflow-y: auto;
-    }
-    Label {
-        color: #2a2a4a;
-        padding: 0 0;
-        height: 1;
-    }
-    Footer {
-        background: #0a0a1a;
-    }
-    """
 
-    BINDINGS = [
-        Binding("q",      "quit", "Quit", show=True),
-        Binding("escape", "quit", "Quit", show=False),
-    ]
+def redraw(stdscr, state: State):
+    """Partition terminal and redraw all panels."""
+    h, w = stdscr.getmaxyx()
+    state_copy = (state.prices.copy(), state.agents.copy(),
+                  state.trades[:], state.gpus[:], state.connected)
+    prices, agents, trades, gpus, connected = state_copy
 
-    TITLE = "⚡ PhantomEx Monitor"
+    # Heights
+    hdr_h   = 3
+    gpu_h   = max(3, len(gpus) + 2) if gpus else 3
+    trade_h = min(12, max(4, len([t for t in trades if t.get("side") != "hold"]) + 2))
+    agent_h = max(4, h - hdr_h - gpu_h - trade_h)
 
-    def __init__(self, ws_url: str = WS_URL):
-        super().__init__()
-        self._ws_url        = ws_url
-        self._prices: dict  = {}
-        self._agents: dict  = {}
-        self._trades: list  = []
-        self._agent_names: dict = {}
+    row = 0
+    hdr_win   = stdscr.derwin(hdr_h,   w, row, 0); row += hdr_h
+    gpu_win   = stdscr.derwin(gpu_h,   w, row, 0); row += gpu_h
+    agent_win = stdscr.derwin(agent_h, w, row, 0); row += agent_h
+    trade_win = stdscr.derwin(trade_h, w, row, 0)
 
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        yield TickerBar()
-        yield GpuPanel()
-        yield AgentPanel()
-        yield TradePanel()
-        yield Footer()
+    draw_header(hdr_win,   prices,  connected)
+    draw_gpus  (gpu_win,   gpus)
+    draw_agents(agent_win, agents,  prices)
+    draw_trades(trade_win, trades)
 
-    def on_mount(self) -> None:
-        self.run_worker(self._ws_loop(),  exclusive=True, name="ws")
-        self.run_worker(self._gpu_loop(), exclusive=True, name="gpu")
+    curses.doupdate()
 
-    async def _gpu_loop(self) -> None:
-        while True:
-            gpus = await asyncio.get_event_loop().run_in_executor(None, query_gpus)
-            self.query_one(GpuPanel).refresh_gpus(list(gpus))
-            await asyncio.sleep(5)
 
-    async def _ws_loop(self) -> None:
-        http_base = self._ws_url.replace("ws://", "http://").replace("/ws", "")
+async def gpu_loop(state: State):
+    while True:
+        gpus = await asyncio.get_event_loop().run_in_executor(None, _query_gpus)
+        with state.lock:
+            state.gpus = gpus
+        await asyncio.sleep(5)
 
-        # Wait for DOM to fully mount before any widget updates
-        await asyncio.sleep(0.5)
 
-        while True:
-            # ── Seed state from REST before opening WS ────────────────────
-            try:
-                import httpx
-                async with httpx.AsyncClient(timeout=5) as client:
-                    # Agents
-                    a_resp = await client.get(f"{http_base}/api/agents")
+async def ws_loop(state: State):
+    http_base = HTTP_URL
+    while True:
+        # Seed from REST
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                a_resp = await client.get(f"{http_base}/api/agents")
+                with state.lock:
                     for a in a_resp.json():
                         aid = a.get("id", "")
-                        self._agents[aid] = a
-                        self._agent_names[aid] = a.get("name", aid[:8])
+                        state.agents[aid] = a
+                        state.agent_names[aid] = a.get("name", aid[:8])
 
-                    # Trades
-                    t_resp = await client.get(f"{http_base}/api/trades?limit=100")
-                    raw_trades = t_resp.json()
-                    for t in raw_trades:
+                t_resp = await client.get(f"{http_base}/api/trades?limit=60")
+                raw = t_resp.json()
+                with state.lock:
+                    for t in raw:
                         aid = t.get("agent_id", "")
-                        t["agent_name"] = self._agent_names.get(aid, aid[:8])
-                    self._trades = sorted(
-                        raw_trades,
-                        key=lambda x: x.get("timestamp", ""),
-                        reverse=True,
-                    )
-            except Exception:
-                pass  # backend not up yet — WS connect will also fail → sleep 3s
+                        t["agent_name"] = state.agent_names.get(aid, aid[:8])
+                    state.trades = sorted(raw, key=lambda x: x.get("timestamp",""), reverse=True)
+        except Exception:
+            pass
 
-            # Push seeded data to widgets (safe — _body is set by on_mount)
-            self.query_one(AgentPanel).refresh_agents(dict(self._agents))
-            self.query_one(TradePanel).refresh_trades(list(self._trades))
+        # Open WS
+        try:
+            async with websockets.connect(
+                f"{http_base.replace('http','ws')}/ws", open_timeout=5
+            ) as ws:
+                with state.lock:
+                    state.connected = True
+                async for raw in ws:
+                    msg = json.loads(raw)
+                    t   = msg.get("type")
+                    with state.lock:
+                        if t == "prices":
+                            state.prices = msg["data"]
+                        elif t == "agent_state":
+                            ag  = msg["data"]
+                            aid = ag["id"]
+                            state.agents[aid] = ag
+                            state.agent_names[aid] = ag.get("name", aid[:8])
+                        elif t == "agent_removed":
+                            state.agents.pop(msg.get("agent_id",""), None)
+                        elif t == "trade":
+                            tr  = msg["data"]
+                            aid = tr.get("agent_id","")
+                            tr["agent_name"] = state.agent_names.get(aid, aid[:8])
+                            state.trades.insert(0, tr)
+                            state.trades = state.trades[:200]
+                        elif t == "portfolio":
+                            aid = msg.get("agent_id")
+                            if aid and aid in state.agents:
+                                state.agents[aid]["portfolio"] = msg["data"]
+        except Exception:
+            with state.lock:
+                state.connected = False
+            await asyncio.sleep(3)
 
-            # ── Open WebSocket and stream events ──────────────────────────
+
+async def redraw_loop(stdscr, state: State):
+    while True:
+        with state.lock:
             try:
-                async with websockets.connect(self._ws_url, open_timeout=5) as ws:
-                    async for raw in ws:
-                        self._handle(json.loads(raw))
+                redraw(stdscr, state)
             except Exception:
-                await asyncio.sleep(3)
-
-    def _handle(self, msg: dict) -> None:
-        t = msg.get("type")
-
-        if t == "prices":
-            self._prices = msg["data"]
-            self.query_one(TickerBar).refresh_ticker(dict(self._prices))
-
-        elif t == "agent_state":
-            agent = msg["data"]
-            aid   = agent["id"]
-            self._agents[aid] = agent
-            self._agent_names[aid] = agent.get("name", aid[:8])
-            self.query_one(AgentPanel).refresh_agents(dict(self._agents))
-
-        elif t == "agent_removed":
-            self._agents.pop(msg.get("agent_id", ""), None)
-            self.query_one(AgentPanel).refresh_agents(dict(self._agents))
-
-        elif t == "trade":
-            trade = msg["data"]
-            aid   = trade.get("agent_id", "")
-            trade["agent_name"] = self._agent_names.get(aid, aid[:8])
-            self._trades.insert(0, trade)
-            self._trades = self._trades[:200]
-            self.query_one(TradePanel).refresh_trades(list(self._trades))
-
-        elif t == "portfolio":
-            aid = msg.get("agent_id")
-            if aid and aid in self._agents:
-                self._agents[aid]["portfolio"] = msg["data"]
-                self.query_one(AgentPanel).refresh_agents(dict(self._agents))
+                pass
+        await asyncio.sleep(0.5)
 
 
-def main() -> None:
-    url = sys.argv[1] if len(sys.argv) > 1 else WS_URL
-    PhantomExMonitor(ws_url=url).run()
+async def input_loop(stdscr):
+    """Non-blocking key reader — returns when Q/ESC pressed."""
+    while True:
+        key = stdscr.getch()
+        if key in (ord('q'), ord('Q'), 27):  # ESC = 27
+            return
+        await asyncio.sleep(0.05)
+
+
+def run(stdscr):
+    curses.curs_set(0)
+    stdscr.nodelay(True)   # getch() returns -1 immediately when no key
+    stdscr.timeout(0)
+    init_colors()
+    stdscr.clear()
+
+    state = State()
+
+    async def main():
+        tasks = [
+            asyncio.create_task(ws_loop(state)),
+            asyncio.create_task(gpu_loop(state)),
+            asyncio.create_task(redraw_loop(stdscr, state)),
+            asyncio.create_task(input_loop(stdscr)),
+        ]
+        # Exit when input_loop finishes (Q or ESC)
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for t in pending:
+            t.cancel()
+
+    asyncio.run(main())
+
+
+def main():
+    global HTTP_URL
+    if len(sys.argv) > 1:
+        # Accept either ws:// or http:// base
+        arg = sys.argv[1]
+        if arg.startswith("ws://"):
+            HTTP_URL = arg.replace("ws://", "http://").rstrip("/ws").rstrip("/")
+        elif arg.startswith("http://"):
+            HTTP_URL = arg.rstrip("/")
+    curses.wrapper(run)
 
 
 if __name__ == "__main__":

@@ -275,6 +275,8 @@ class Agent:
         if now - self._last_run_at < self.trade_interval:
             return  # not time yet
 
+        self._running = True  # mark as actively running
+
         # Set started_at on first run and persist it
         if self.started_at is None:
             self.started_at = now
@@ -383,6 +385,7 @@ class AgentRegistry:
             on_decision=on_decision,
             on_thought=on_thought,
         )
+        agent._running = True  # agent is active as soon as created
         self._agents[agent_id] = agent
         return agent
 
@@ -417,6 +420,7 @@ class AgentRegistry:
             )
             # Restore started_at so session timer survives restarts
             agent.started_at = row["started_at"]
+            agent._running = True  # mark as running — loop driven by price ticks
             # Portfolio._load() already reconstructs cash + holdings from DB
             self._agents[row["id"]] = agent
         count = len(rows)
