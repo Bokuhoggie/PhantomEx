@@ -186,6 +186,7 @@ class CreateAgentRequest(BaseModel):
     goal: str = ""
     trade_interval: float = 60.0            # seconds between think cycles
     risk_profile: str = "neutral"           # "aggressive" | "neutral" | "safe"
+    max_duration: Optional[float] = None    # seconds; None = run forever
     initial_holdings: dict[str, float] = {} # {symbol: quantity} — declared, not bought
 
 
@@ -199,6 +200,7 @@ async def create_agent(req: CreateAgentRequest):
         goal=req.goal,
         trade_interval=req.trade_interval,
         risk_profile=req.risk_profile,
+        max_duration=req.max_duration,
         on_trade=on_trade,
         on_decision=on_decision,
         on_thought=on_thought,
@@ -291,6 +293,25 @@ async def set_risk_profile(agent_id: str, body: dict):
     from core.db import get_db
     with get_db() as conn:
         conn.execute("UPDATE agents SET risk_profile = ? WHERE id = ?", (profile, agent_id))
+    prices = market_feed.get_prices()
+    await ws_manager.broadcast({
+        "type": "agent_state",
+        "data": {**agent.to_dict(), "portfolio": agent.portfolio.to_dict(prices)},
+    })
+    return {"ok": True}
+
+
+@app.patch("/api/agents/{agent_id}/duration")
+async def set_agent_duration(agent_id: str, body: dict):
+    """Set or clear the max session duration for an agent (in seconds). None = unlimited."""
+    agent = agent_registry.get(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    max_duration = body.get("max_duration")  # None clears the limit
+    agent.max_duration = max_duration
+    from core.db import get_db
+    with get_db() as conn:
+        conn.execute("UPDATE agents SET max_duration = ? WHERE id = ?", (max_duration, agent_id))
     prices = market_feed.get_prices()
     await ws_manager.broadcast({
         "type": "agent_state",

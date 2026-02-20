@@ -3,7 +3,7 @@ Portfolio management for PhantomEx.
 Handles trade execution, balance tracking, and P&L calculation.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from core.db import get_db
 
@@ -165,7 +165,7 @@ class Portfolio:
             "total": total,
             "reasoning": reasoning,
             "mode": mode,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         return trade
 

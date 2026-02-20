@@ -7,7 +7,7 @@ import asyncio
 import httpx
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Optional
 from core.db import get_db
 
@@ -77,7 +77,7 @@ class MarketFeed:
                 "price": data.get("usd", 0),
                 "change_24h": data.get("usd_24h_change", 0),
                 "volume_24h": data.get("usd_24h_vol", 0),
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
         return prices
 
@@ -102,11 +102,26 @@ class MarketFeed:
 
     async def _run_live(self):
         print("[market] Starting live feed...")
+        _backoff = 0  # extra seconds to wait after a 429
         while self._running:
+            if _backoff > 0:
+                print(f"[market] Rate-limited — waiting {_backoff}s before retry...")
+                await asyncio.sleep(_backoff)
+                _backoff = 0
             try:
                 prices = await self._fetch_live()
                 await self._save_snapshot(prices)
                 await self._notify(prices)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429:
+                    _backoff = 120  # wait 2 min before hitting CoinGecko again
+                    print(f"[market] 429 rate limit — will retry in {_backoff}s")
+                    # Still fire subscribers with cached prices so agents keep running
+                    if self._prices:
+                        print("[market] Notifying agents with cached prices...")
+                        await self._notify(self._prices)
+                else:
+                    print(f"[market] HTTP error fetching prices: {e}")
             except Exception as e:
                 print(f"[market] Error fetching prices: {e}")
             await asyncio.sleep(self.interval)

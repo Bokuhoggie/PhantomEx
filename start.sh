@@ -48,7 +48,9 @@ fi
 
 # ── Start ─────────────────────────────────────────────────────────────────────
 PORT="${PHANTOMEX_PORT:-8000}"
-ok "Starting PhantomEx on http://localhost:$PORT"
+# Default OLLAMA_HOST for timone (port 8081); override with env var if needed
+export OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:8081}"
+ok "Starting PhantomEx on http://localhost:$PORT  (Ollama: $OLLAMA_HOST)"
 warn "Press Ctrl+C to stop."
 echo ""
 

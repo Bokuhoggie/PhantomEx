@@ -8,11 +8,13 @@
   let filterSide  = 'all'
   let showReasoning = false
 
-  $: filtered = $trades.filter(t => {
-    if (filterAgent !== 'all' && t.agent_id !== filterAgent) return false
-    if (filterSide  !== 'all' && t.side    !== filterSide)   return false
-    return true
-  })
+  $: filtered = $trades
+    .filter(t => {
+      if (filterAgent !== 'all' && t.agent_id !== filterAgent) return false
+      if (filterSide  !== 'all' && t.side    !== filterSide)   return false
+      return true
+    })
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
 
   $: buyCount  = filtered.filter(t => t.side === 'buy').length
   $: sellCount = filtered.filter(t => t.side === 'sell').length

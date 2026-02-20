@@ -11,6 +11,7 @@
 #   status              Show running status
 #   build               Rebuild the frontend
 #   logs                Tail the server log
+#   monitor / tui       Launch the terminal monitor UI
 #   server <cmd>        Manage the timone deployment
 #     server start|stop|restart|logs|status|deploy
 #
@@ -174,6 +175,13 @@ cmd_logs() {
   tail -f "$LOG_FILE"
 }
 
+cmd_monitor() {
+  ensure_venv
+  log "Launching PhantomEx terminal monitor (Q or ESC to exit)..."
+  cd "$BACKEND"
+  exec "$VENV/bin/python" -m tui.monitor "$@"
+}
+
 # ── Server (timone) ───────────────────────────────────────────────────────────
 ssh_timone() {
   ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$TIMONE_HOST" "$@"
@@ -240,6 +248,8 @@ cmd_help() {
   echo "  phantomex build         Rebuild frontend"
   echo "  phantomex logs          Tail server log"
   echo ""
+  echo "  phantomex monitor        Launch terminal monitor (TUI)"
+  echo ""
   echo "  phantomex server start   Start on timone (systemd)"
   echo "  phantomex server stop    Stop on timone"
   echo "  phantomex server restart Restart on timone"
@@ -257,14 +267,15 @@ CMD="${1:-start}"
 shift || true
 
 case "$CMD" in
-  start|up)     cmd_start ;;
-  stop|down)    cmd_stop ;;
-  restart)      cmd_restart ;;
-  status)       cmd_status ;;
-  build)        cmd_build ;;
-  logs|log)     cmd_logs ;;
-  server)       cmd_server "${1:-status}" ;;
-  help|--help|-h) cmd_help ;;
+  start|up)          cmd_start ;;
+  stop|down)         cmd_stop ;;
+  restart)           cmd_restart ;;
+  status)            cmd_status ;;
+  build)             cmd_build ;;
+  logs|log)          cmd_logs ;;
+  monitor|tui)       cmd_monitor "$@" ;;
+  server)            cmd_server "${1:-status}" ;;
+  help|--help|-h)    cmd_help ;;
   *)
     err "Unknown command: $CMD"
     cmd_help

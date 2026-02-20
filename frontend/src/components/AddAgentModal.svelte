@@ -19,6 +19,17 @@
   // Trade frequency (slider in minutes, sent to backend as seconds)
   let tradeIntervalMin = 1
 
+  // Session duration limit (seconds; null = no limit)
+  let maxDurationSecs = null
+  const DURATION_OPTIONS = [
+    { label: 'No limit', value: null },
+    { label: '30 min',  value: 30 * 60 },
+    { label: '1 hour',  value: 60 * 60 },
+    { label: '2 hours', value: 2 * 60 * 60 },
+    { label: '4 hours', value: 4 * 60 * 60 },
+    { label: '8 hours', value: 8 * 60 * 60 },
+  ]
+
   // Coin search + initial holdings
   const SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','AVAX','DOT','MATIC']
   let coinSearch = ''
@@ -61,6 +72,7 @@
           goal,
           trade_interval: tradeIntervalMin * 60,
           risk_profile: riskProfile,
+          max_duration: maxDurationSecs,
           initial_holdings: initialHoldings,
         }),
       })
@@ -150,23 +162,33 @@
         </div>
       </div>
 
-      <!-- Trade Frequency -->
-      <div class="freq-section">
+      <!-- Trade Frequency + Stop After (same row) -->
+      <div class="row">
+        <div class="freq-section">
+          <label>
+            Trade Frequency
+            <div class="freq-row">
+              <input
+                type="range"
+                min="1"
+                max="60"
+                step="1"
+                bind:value={tradeIntervalMin}
+                class="freq-slider"
+              />
+              <span class="freq-label">
+                {tradeIntervalMin === 1 ? 'every 1m' : `every ${tradeIntervalMin}m`}
+              </span>
+            </div>
+          </label>
+        </div>
         <label>
-          Trade Frequency
-          <div class="freq-row">
-            <input
-              type="range"
-              min="1"
-              max="60"
-              step="1"
-              bind:value={tradeIntervalMin}
-              class="freq-slider"
-            />
-            <span class="freq-label">
-              {tradeIntervalMin === 1 ? 'every minute' : `every ${tradeIntervalMin} min`}
-            </span>
-          </div>
+          Stop After
+          <select bind:value={maxDurationSecs}>
+            {#each DURATION_OPTIONS as opt}
+              <option value={opt.value}>{opt.label}</option>
+            {/each}
+          </select>
         </label>
       </div>
 

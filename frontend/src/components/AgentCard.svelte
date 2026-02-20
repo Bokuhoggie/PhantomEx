@@ -1,5 +1,5 @@
 <script>
-  import { approveTrade, rejectTrade, pendingDecisions, trades } from '../lib/ws.js'
+  import { approveTrade, rejectTrade, pendingDecisions, trades, prices } from '../lib/ws.js'
   import PortfolioChart from './PortfolioChart.svelte'
 
   export let agent
@@ -9,10 +9,9 @@
   $: pnl          = portfolio.unrealized_pnl || {}
   $: pending      = $pendingDecisions[agent.id]
   $: thought      = agent.last_thought
-  $: agentTrades  = $trades.filter(t => t.agent_id === agent.id)
+  $: agentTrades  = $trades.filter(t => t.agent_id === agent.id && t.side !== 'hold')
   $: pnlDiff      = (portfolio.total_value || 0) - (agent.allowance || 0)
   $: pnlPct       = (agent.allowance || 1) > 0 ? (pnlDiff / agent.allowance) * 100 : 0
-  $: inPositions  = (agent.allowance || 0) - (portfolio.cash || 0)
   $: holdingCount = Object.keys(holdings).length
 
   $: intervalLabel = agent.trade_interval
@@ -22,12 +21,16 @@
     : null
 
   $: statusLabel = (() => {
+    if (!agent.running && agent.started_at) return 'Stopped'
     if (!thought) return 'Idle'
     if (thought.action === 'buy')  return `Bought ${thought.symbol}`
     if (thought.action === 'sell') return `Sold ${thought.symbol}`
     return 'Holding'
   })()
-  $: statusClass = thought?.action === 'buy' ? 'buy' : thought?.action === 'sell' ? 'sell' : 'hold'
+  $: statusClass = !agent.running && agent.started_at ? 'stopped'
+    : thought?.action === 'buy' ? 'buy'
+    : thought?.action === 'sell' ? 'sell'
+    : 'hold'
 
   // ── In-browser thought history ───────────────────────────────────────────────
   const MAX_THOUGHTS = 50
@@ -37,6 +40,37 @@
     prevThoughtTs = thought.timestamp
     thoughtHistory = [thought, ...thoughtHistory].slice(0, MAX_THOUGHTS)
   }
+
+  // ── Session timer ────────────────────────────────────────────────────────────
+  let elapsed = 0
+  let timerInterval = null
+
+  $: {
+    if (agent.started_at && agent.running !== false) {
+      if (!timerInterval) {
+        timerInterval = setInterval(() => {
+          elapsed = Date.now() / 1000 - agent.started_at
+        }, 1000)
+      }
+    } else {
+      if (timerInterval) { clearInterval(timerInterval); timerInterval = null }
+      elapsed = agent.started_at ? (Date.now() / 1000 - agent.started_at) : 0
+    }
+  }
+
+  function fmtDuration(secs) {
+    const h = Math.floor(secs / 3600)
+    const m = Math.floor((secs % 3600) / 60)
+    const s = Math.floor(secs % 60)
+    if (h > 0) return `${h}h ${m}m`
+    if (m > 0) return `${m}m ${s}s`
+    return `${s}s`
+  }
+
+  $: durationProgress = agent.max_duration && elapsed ? elapsed / agent.max_duration : null
+  $: durationLabel = agent.max_duration
+    ? `${fmtDuration(elapsed)} / ${fmtDuration(agent.max_duration)}`
+    : elapsed > 0 ? fmtDuration(elapsed) : null
 
   // ── Panel state ──────────────────────────────────────────────────────────────
   let walletOpen  = false
@@ -124,7 +158,7 @@
   }
 </script>
 
-<div class="agent-card" class:flash={tradeFlash} class:advisory={agent.mode === 'advisory'}>
+<div class="agent-card" class:flash={tradeFlash} class:advisory={agent.mode === 'advisory'} class:stopped={!agent.running && agent.started_at}>
 
   <!-- ── Header ── -->
   <div class="card-header">
@@ -133,7 +167,7 @@
       <div class="meta-pills">
         <span class="pill model">{agent.model.split(':')[0]}</span>
         {#if intervalLabel}
-          <span class="pill interval">⏱ {intervalLabel}</span>
+          <span class="pill interval">every {intervalLabel}</span>
         {/if}
         <button class="pill mode" on:click={toggleMode}>{agent.mode}</button>
         <!-- Live risk toggle pill -->
@@ -143,6 +177,12 @@
             on:click={cycleRisk}
             title="Click to cycle risk profile"
           >{riskEmoji(agent.risk_profile)} {agent.risk_profile}</button>
+        {/if}
+        <!-- Session timer pill -->
+        {#if durationLabel}
+          <span class="pill timer" class:timer-warn={durationProgress && durationProgress > 0.75} class:timer-done={!agent.running && agent.started_at}>
+            ⏱ {durationLabel}
+          </span>
         {/if}
       </div>
     </div>
@@ -164,7 +204,7 @@
   <!-- ── KPI Row ── -->
   <div class="kpi-row">
     <div class="kpi">
-      <span class="kpi-label">Value</span>
+      <span class="kpi-label">Portfolio</span>
       <span class="kpi-val">${fmtCompact(portfolio.total_value || 0)}</span>
     </div>
     <div class="kpi">
@@ -179,7 +219,7 @@
       </span>
     </div>
     <div class="kpi">
-      <span class="kpi-label">Actions</span>
+      <span class="kpi-label">Trades</span>
       <span class="kpi-val">{agentTrades.length}</span>
     </div>
   </div>
@@ -191,10 +231,12 @@
       <div class="holdings-list">
         {#each Object.entries(holdings) as [symbol, h]}
           {@const p = pnl[symbol] || {}}
+          {@const currentPrice = $prices[symbol]?.price ?? h.avg_cost}
+          {@const positionValue = h.quantity * currentPrice}
           <div class="holding-row">
             <span class="h-sym">{symbol}</span>
-            <span class="h-qty">{fmt(h.quantity, 6)}</span>
-            <span class="h-cost">@ ${fmtCompact(h.avg_cost)}</span>
+            <span class="h-qty">{fmt(h.quantity, 4)}</span>
+            <span class="h-val">≈ ${fmtCompact(positionValue)}</span>
             <span class="h-pnl" class:pos={p.unrealized >= 0} class:neg={p.unrealized < 0}>
               {p.unrealized >= 0 ? '+' : ''}{fmtCompact(p.unrealized || 0)}
               <span class="h-pnl-pct">({fmt(p.pct || 0)}%)</span>
@@ -202,20 +244,6 @@
           </div>
         {/each}
       </div>
-    </div>
-  {/if}
-
-  <!-- ── Latest AI Thought ── -->
-  {#if thought}
-    <div class="thought-block">
-      <div class="thought-action {thought.action}">
-        {thought.action.toUpperCase()}
-        {#if thought.symbol && thought.action !== 'hold'}
-          <span class="thought-detail">{thought.quantity} {thought.symbol}</span>
-        {/if}
-        <span class="thought-time">{fmtTime(thought.timestamp)}</span>
-      </div>
-      <div class="thought-reasoning">"{thought.reasoning}"</div>
     </div>
   {/if}
 
@@ -259,13 +287,14 @@
       <div class="wallet-rows">
         <div class="w-row"><span>Allowance</span><span>${fmt(agent.allowance || 0)}</span></div>
         <div class="w-row"><span>Cash</span><span>${fmt(portfolio.cash || 0)}</span></div>
-        <div class="w-row"><span>In Positions</span><span>${fmt(inPositions > 0 ? inPositions : 0)}</span></div>
         {#if holdingCount > 0}
           <div class="w-divider"></div>
           {#each Object.entries(holdings) as [symbol, h]}
+            {@const cp = $prices[symbol]?.price ?? h.avg_cost}
+            {@const posVal = h.quantity * cp}
             <div class="w-row">
-              <span>{symbol} × {fmt(h.quantity, 6)}</span>
-              <span class="w-muted">avg ${fmt(h.avg_cost)}</span>
+              <span>{symbol} × {fmt(h.quantity, 4)}</span>
+              <span>≈ ${fmtCompact(posVal)}</span>
             </div>
           {/each}
         {/if}
@@ -286,23 +315,19 @@
   {#if logOpen}
     <div class="expandable log-body">
       {#if agentTrades.length === 0}
-        <div class="log-empty">No actions yet.</div>
+        <div class="log-empty">No trades yet.</div>
       {:else}
-        {#each agentTrades as t}
-          <div class="log-trade" class:hold-row={t.side === 'hold'}>
+        {#each agentTrades.sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp)) as t}
+          <div class="log-trade">
             <span class="lt-side {t.side}">{t.side.toUpperCase()}</span>
-            {#if t.side !== 'hold'}
-              <span class="lt-sym">{t.symbol}</span>
-              <span class="lt-qty">{fmt(t.quantity, 6)}</span>
-              <span class="lt-price">@ ${fmtCompact(t.price)}</span>
-              <span class="lt-total">${fmtCompact(t.total)}</span>
-            {:else}
-              <span class="lt-hold-spacer"></span>
-            {/if}
+            <span class="lt-sym">{t.symbol}</span>
+            <span class="lt-qty">{fmt(t.quantity, 4)}</span>
+            <span class="lt-price">@ ${fmtCompact(t.price)}</span>
+            <span class="lt-total">${fmtCompact(t.total)}</span>
             <span class="lt-time">{fmtTime(t.timestamp)}</span>
           </div>
           {#if t.reasoning}
-            <div class="lt-reasoning" class:hold-reasoning={t.side === 'hold'}>"{t.reasoning}"</div>
+            <div class="lt-reasoning">"{t.reasoning}"</div>
           {/if}
         {/each}
       {/if}
@@ -354,6 +379,7 @@
     box-shadow: 0 0 18px rgba(112, 96, 208, 0.3);
   }
   .agent-card.advisory { border-color: #3a2a6a; }
+  .agent-card.stopped  { opacity: 0.7; border-color: #2a2a3a; }
 
   /* Header */
   .card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem; }
@@ -372,6 +398,11 @@
   .pill.mode     { background: #1e1a3a; color: #9070d0; border: 1px solid #3a2a6a; cursor: pointer; text-transform: capitalize; }
   .pill.mode:hover { background: #2e2a4a; }
 
+  /* Timer pill */
+  .pill.timer       { background: #1a1a30; color: #6060a0; border: 1px solid #2e2e4a; font-variant-numeric: tabular-nums; }
+  .pill.timer-warn  { background: #2a1a0a; color: #e08020; border-color: #a05010; }
+  .pill.timer-done  { background: #1a1a2a; color: #444; border-color: #2a2a3a; }
+
   /* Risk pill */
   .pill.risk {
     cursor: pointer;
@@ -388,9 +419,10 @@
     font-size: 0.63rem; font-weight: 600; padding: 2px 8px;
     border-radius: 10px; white-space: nowrap;
   }
-  .status-dot.buy  { background: rgba(0,212,160,0.1);  color: #00d4a0; border: 1px solid rgba(0,212,160,0.3); }
-  .status-dot.sell { background: rgba(255,77,109,0.1); color: #ff4d6d; border: 1px solid rgba(255,77,109,0.3); }
-  .status-dot.hold { background: rgba(80,80,100,0.1);  color: #555;    border: 1px solid #2e2e4a; }
+  .status-dot.buy     { background: rgba(0,212,160,0.1);  color: #00d4a0; border: 1px solid rgba(0,212,160,0.3); }
+  .status-dot.sell    { background: rgba(255,77,109,0.1); color: #ff4d6d; border: 1px solid rgba(255,77,109,0.3); }
+  .status-dot.hold    { background: rgba(80,80,100,0.1);  color: #555;    border: 1px solid #2e2e4a; }
+  .status-dot.stopped { background: rgba(60,60,80,0.1);   color: #444;    border: 1px solid #2e2e3a; }
 
   .icon-btn { background: none; border: none; cursor: pointer; color: #444; font-size: 0.82rem; padding: 2px 4px; border-radius: 3px; }
   .icon-btn.delete:hover { color: #ff4d6d; }
@@ -425,27 +457,10 @@
   .holdings-list { display: flex; flex-direction: column; gap: 0.15rem; }
   .holding-row { display: flex; gap: 0.5rem; align-items: center; font-size: 0.74rem; padding: 0.12rem 0; }
   .h-sym  { color: #a090d0; font-weight: 700; width: 40px; }
-  .h-qty  { font-family: monospace; color: #c0c0d0; flex: 1; font-size: 0.7rem; }
-  .h-cost { font-family: monospace; color: #555; font-size: 0.68rem; }
+  .h-qty  { font-family: monospace; color: #888; font-size: 0.68rem; width: 64px; }
+  .h-val  { font-family: monospace; color: #c0c0d0; font-size: 0.72rem; flex: 1; }
   .h-pnl  { font-family: monospace; font-size: 0.7rem; }
   .h-pnl-pct { font-size: 0.6rem; color: #666; }
-
-  /* Latest thought block */
-  .thought-block {
-    background: #080816; border: 1px solid #1a1a30;
-    border-left: 3px solid #3a2a6a; border-radius: 0 5px 5px 0;
-    padding: 0.4rem 0.6rem; display: flex; flex-direction: column; gap: 0.2rem;
-  }
-  .thought-action { font-size: 0.72rem; font-weight: 700; display: flex; align-items: center; gap: 0.5rem; }
-  .thought-action.buy  { color: #00d4a0; }
-  .thought-action.sell { color: #ff4d6d; }
-  .thought-action.hold { color: #666; }
-  .thought-detail { font-weight: 400; color: #888; }
-  .thought-time   { margin-left: auto; font-size: 0.6rem; color: #444; font-weight: 400; }
-  .thought-reasoning {
-    font-size: 0.72rem; color: #7070a0; font-style: italic;
-    line-height: 1.4; white-space: pre-wrap; word-break: break-word;
-  }
 
   /* Pending */
   .pending-block {
@@ -499,7 +514,6 @@
   .wallet-rows { display: flex; flex-direction: column; gap: 0.2rem; }
   .w-row { display: flex; justify-content: space-between; font-size: 0.75rem; color: #888; }
   .w-row span:last-child { color: #c0c0d0; font-family: monospace; }
-  .w-muted { color: #555 !important; }
   .w-divider { height: 1px; background: #18182e; margin: 0.2rem 0; }
   .deposit-row {
     display: flex; gap: 0.4rem; margin-top: 0.3rem;
@@ -527,24 +541,20 @@
     display: flex; gap: 0.4rem; font-size: 0.68rem;
     align-items: center; padding: 0.1rem 0;
   }
-  .log-trade.hold-row { opacity: 0.55; }
   .lt-side { font-weight: 700; width: 28px; }
   .lt-side.buy  { color: #00d4a0; }
   .lt-side.sell { color: #ff4d6d; }
-  .lt-side.hold { color: #444; font-style: italic; }
   .lt-sym   { color: #a090d0; width: 34px; font-weight: 600; }
   .lt-qty   { font-family: monospace; color: #c0c0d0; flex: 1; }
   .lt-price { font-family: monospace; color: #888; }
   .lt-total { font-family: monospace; color: #6a5aaa; font-size: 0.64rem; }
   .lt-time  { color: #444; font-size: 0.6rem; margin-left: auto; }
-  .lt-hold-spacer { flex: 1; }
   .lt-reasoning {
     font-size: 0.64rem; color: #4a4a6a; font-style: italic;
     padding: 0 0 0.2rem 0.5rem; border-left: 1px solid #28284a;
     margin: 0 0 0.1rem 2px; line-height: 1.3;
     white-space: pre-wrap; word-break: break-word;
   }
-  .lt-reasoning.hold-reasoning { color: #383848; border-left-color: #1e1e38; }
 
   /* AI Thought Log Panel */
   .ai-log-body { max-height: 320px; overflow-y: auto; gap: 0.35rem !important; }
