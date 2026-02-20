@@ -127,12 +127,15 @@ class Portfolio:
         else:
             raise ValueError(f"Invalid side: {side}")
 
+        # Generate timestamp once — used for both DB insert and returned trade dict
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         # Persist to DB
         with get_db() as conn:
             conn.execute(
-                """INSERT INTO trades (agent_id, symbol, side, quantity, price, total, reasoning, mode)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (self.agent_id, symbol, side, quantity, price, total, reasoning, mode),
+                """INSERT INTO trades (agent_id, symbol, side, quantity, price, total, reasoning, mode, timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (self.agent_id, symbol, side, quantity, price, total, reasoning, mode, ts),
             )
             # Upsert portfolio holdings
             if symbol in self._holdings:
@@ -165,7 +168,7 @@ class Portfolio:
             "total": total,
             "reasoning": reasoning,
             "mode": mode,
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "timestamp": ts,
         }
         return trade
 
