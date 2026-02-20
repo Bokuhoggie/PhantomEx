@@ -10,6 +10,7 @@
   $: pending      = $pendingDecisions[agent.id]
   $: thought      = agent.last_thought
   $: agentTrades  = $trades.filter(t => t.agent_id === agent.id && t.side !== 'hold')
+  $: agentAllActions = $trades.filter(t => t.agent_id === agent.id)
   $: pnlDiff      = (portfolio.total_value || 0) - (agent.allowance || 0)
   $: pnlPct       = (agent.allowance || 1) > 0 ? (pnlDiff / agent.allowance) * 100 : 0
   $: holdingCount = Object.keys(holdings).length
@@ -31,15 +32,6 @@
     : thought?.action === 'buy' ? 'buy'
     : thought?.action === 'sell' ? 'sell'
     : 'hold'
-
-  // ── In-browser thought history ───────────────────────────────────────────────
-  const MAX_THOUGHTS = 50
-  let thoughtHistory = []
-  let prevThoughtTs = null
-  $: if (thought?.timestamp && thought.timestamp !== prevThoughtTs) {
-    prevThoughtTs = thought.timestamp
-    thoughtHistory = [thought, ...thoughtHistory].slice(0, MAX_THOUGHTS)
-  }
 
   // ── Session timer ────────────────────────────────────────────────────────────
   let elapsed = 0
@@ -75,9 +67,10 @@
   // ── Panel state ──────────────────────────────────────────────────────────────
   let walletOpen  = false
   let logOpen     = false
-  let aiLogOpen   = false
   let trading     = false
   let tradeFlash  = false
+  let saving      = false
+  let saveFlash   = false
   let depositAmount = ''
   let depositing    = false
   let depositError  = ''
@@ -108,6 +101,21 @@
   async function deleteAgent() {
     if (!confirm(`Remove agent "${agent.name}"?`)) return
     await fetch(`/api/agents/${agent.id}`, { method: 'DELETE' })
+  }
+
+  async function saveSession() {
+    saving = true
+    try {
+      await fetch(`/api/agents/${agent.id}/save_session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      saveFlash = true
+      setTimeout(() => saveFlash = false, 2000)
+    } finally {
+      saving = false
+    }
   }
 
   async function toggleMode() {
@@ -274,10 +282,10 @@
       💰 Wallet {walletOpen ? '▲' : '▼'}
     </button>
     <button class="toggle-btn log-toggle" on:click={() => logOpen = !logOpen}>
-      📋 Log ({agentTrades.length}) {logOpen ? '▲' : '▼'}
+      📋 Log ({agentAllActions.length}) {logOpen ? '▲' : '▼'}
     </button>
-    <button class="toggle-btn ai-log-toggle" on:click={() => aiLogOpen = !aiLogOpen}>
-      🧠 AI ({thoughtHistory.length}) {aiLogOpen ? '▲' : '▼'}
+    <button class="toggle-btn save-btn" class:save-flash={saveFlash} on:click={saveSession} disabled={saving} title="Save session snapshot">
+      {saving ? '…' : saveFlash ? '✓ Saved' : '💾 Save'}
     </button>
   </div>
 
@@ -314,16 +322,20 @@
   <!-- ── Trade Log Panel ── -->
   {#if logOpen}
     <div class="expandable log-body">
-      {#if agentTrades.length === 0}
-        <div class="log-empty">No trades yet.</div>
+      {#if agentAllActions.length === 0}
+        <div class="log-empty">No activity yet.</div>
       {:else}
-        {#each agentTrades.sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp)) as t}
-          <div class="log-trade">
+        {#each agentAllActions.sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp)) as t}
+          <div class="log-trade" class:log-hold={t.side === 'hold'}>
             <span class="lt-side {t.side}">{t.side.toUpperCase()}</span>
-            <span class="lt-sym">{t.symbol}</span>
-            <span class="lt-qty">{fmt(t.quantity, 4)}</span>
-            <span class="lt-price">@ ${fmtCompact(t.price)}</span>
-            <span class="lt-total">${fmtCompact(t.total)}</span>
+            {#if t.side === 'hold'}
+              <span class="lt-hold-label">{t.symbol || '—'}</span>
+            {:else}
+              <span class="lt-sym">{t.symbol}</span>
+              <span class="lt-qty">{fmt(t.quantity, 4)}</span>
+              <span class="lt-price">@ ${fmtCompact(t.price)}</span>
+              <span class="lt-total">${fmtCompact(t.total)}</span>
+            {/if}
             <span class="lt-time">{fmtTime(t.timestamp)}</span>
           </div>
           {#if t.reasoning}
@@ -334,29 +346,6 @@
     </div>
   {/if}
 
-  <!-- ── AI Thought Log Panel ── -->
-  {#if aiLogOpen}
-    <div class="expandable ai-log-body">
-      {#if thoughtHistory.length === 0}
-        <div class="log-empty">No think cycles recorded yet.</div>
-      {:else}
-        {#each thoughtHistory as th}
-          <div class="ai-entry">
-            <div class="ai-entry-header">
-              <span class="ai-action {th.action}">
-                {th.action.toUpperCase()}
-                {#if th.symbol && th.action !== 'hold'}
-                  <span class="ai-detail">{th.quantity} {th.symbol}</span>
-                {/if}
-              </span>
-              <span class="ai-time">{fmtTime(th.timestamp)}</span>
-            </div>
-            <div class="ai-reasoning">"{th.reasoning}"</div>
-          </div>
-        {/each}
-      {/if}
-    </div>
-  {/if}
 
 </div>
 
@@ -503,7 +492,8 @@
   }
   .wallet-toggle:hover  { border-color: #3a2a6a; color: #a080ff; }
   .log-toggle:hover     { border-color: #1a3a2a; color: #00d4a0; }
-  .ai-log-toggle:hover  { border-color: #2a3a5a; color: #60a0e0; }
+  .save-btn:hover       { border-color: #2a3a6a; color: #6090e0; }
+  .save-flash           { border-color: #00d4a0 !important; color: #00d4a0 !important; }
 
   /* Expandable panels */
   .expandable {
@@ -544,6 +534,9 @@
   .lt-side { font-weight: 700; width: 28px; }
   .lt-side.buy  { color: #00d4a0; }
   .lt-side.sell { color: #ff4d6d; }
+  .lt-side.hold { color: #333; }
+  .log-hold { opacity: 0.5; }
+  .lt-hold-label { color: #555; font-size: 0.64rem; flex: 1; }
   .lt-sym   { color: #a090d0; width: 34px; font-weight: 600; }
   .lt-qty   { font-family: monospace; color: #c0c0d0; flex: 1; }
   .lt-price { font-family: monospace; color: #888; }

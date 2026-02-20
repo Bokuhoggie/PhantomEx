@@ -5,7 +5,8 @@
   import TradeLog      from './components/TradeLog.svelte'
   import AddAgentModal from './components/AddAgentModal.svelte'
   import OllamaSetup   from './components/OllamaSetup.svelte'
-  import DashboardStats from './components/DashboardStats.svelte'
+  import DashboardStats  from './components/DashboardStats.svelte'
+  import SessionsPanel  from './components/SessionsPanel.svelte'
 
   let showAddAgent = false
 
@@ -115,6 +116,12 @@
       </section>
 
     </div>
+
+    <!-- Saved Sessions -->
+    <section class="sessions-section">
+      <SessionsPanel />
+    </section>
+
   </main>
 </div>
 

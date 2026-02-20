@@ -37,7 +37,7 @@
   }
 
   function confirmWipe() {
-    if (confirm('Clear the trade log display? (Trades remain in the database.)')) {
+    if (confirm('Clear the trade log display? Trades before this point will be hidden even after page refresh. (Trades remain in the database.)')) {
       wipeTradeLog()
     }
   }

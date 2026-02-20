@@ -85,6 +85,40 @@ def init_db():
                 change_24h  REAL,
                 timestamp   TEXT NOT NULL DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS saved_sessions (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id     TEXT NOT NULL,
+                agent_name   TEXT NOT NULL,
+                model        TEXT NOT NULL,
+                risk_profile TEXT NOT NULL DEFAULT 'neutral',
+                allowance    REAL NOT NULL,
+                final_value  REAL NOT NULL,
+                pnl          REAL NOT NULL,
+                pnl_pct      REAL NOT NULL,
+                trade_count  INTEGER NOT NULL DEFAULT 0,
+                buy_count    INTEGER NOT NULL DEFAULT 0,
+                sell_count   INTEGER NOT NULL DEFAULT 0,
+                hold_count   INTEGER NOT NULL DEFAULT 0,
+                started_at   REAL,
+                ended_at     REAL NOT NULL,
+                duration_secs REAL,
+                notes        TEXT NOT NULL DEFAULT '',
+                trades_json  TEXT NOT NULL DEFAULT '[]',
+                equity_json  TEXT NOT NULL DEFAULT '[]',
+                saved_at     TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS equity_snapshots (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id    TEXT NOT NULL REFERENCES agents(id),
+                total_value REAL NOT NULL,
+                cash        REAL NOT NULL,
+                timestamp   TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_equity_agent_ts
+                ON equity_snapshots(agent_id, timestamp);
         """)
         # Migrations for existing databases
         conn.executescript("""
@@ -101,4 +135,6 @@ def init_db():
             conn.execute("ALTER TABLE agents ADD COLUMN risk_profile TEXT NOT NULL DEFAULT 'neutral'")
         if "max_duration" not in cols:
             conn.execute("ALTER TABLE agents ADD COLUMN max_duration REAL")
+        if "started_at" not in cols:
+            conn.execute("ALTER TABLE agents ADD COLUMN started_at REAL")
     print("[db] Database initialized.")

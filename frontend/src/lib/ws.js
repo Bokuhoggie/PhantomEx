@@ -13,6 +13,20 @@ export const trades           = writable([])          // recent trade log (newes
 export const pendingDecisions = writable({})          // agent_id -> decision
 export const deploymentLog    = writable([])          // [{id, name, model, action, ts}]
 
+const WIPE_KEY = 'phantomex_wipe_before'
+
+function getWipeBefore() {
+  const v = localStorage.getItem(WIPE_KEY)
+  return v ? Number(v) : 0
+}
+
+function afterWipe(trade) {
+  const wb = getWipeBefore()
+  if (!wb) return true
+  const ts = trade.timestamp ? new Date(trade.timestamp).getTime() : 0
+  return ts > wb
+}
+
 const WS_URL = `ws://${window.location.host}/ws`
 const RECONNECT_MS = 3000
 
@@ -72,7 +86,9 @@ function dispatch(msg) {
       break
 
     case 'trade':
-      trades.update(t => [msg.data, ...t].slice(0, 500))
+      if (afterWipe(msg.data)) {
+        trades.update(t => [msg.data, ...t].slice(0, 500))
+      }
       break
 
     case 'portfolio':
@@ -107,7 +123,7 @@ function connect() {
     try {
       const res = await fetch('/api/trades?limit=500')
       const data = await res.json()
-      trades.set(data)
+      trades.set(data.filter(afterWipe))
     } catch (e) {
       console.warn('[ws] Could not seed trade history', e)
     }
@@ -152,6 +168,7 @@ export function rejectTrade(agentId) {
 
 /** Wipe local trade log display (does not delete from server DB) */
 export function wipeTradeLog() {
+  localStorage.setItem(WIPE_KEY, String(Date.now()))
   trades.set([])
 }
 

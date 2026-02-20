@@ -4,21 +4,39 @@
    * Tracks total_value snapshots over time and renders a sparkline + area fill.
    * No external deps — pure SVG.
    */
-  import { onDestroy } from 'svelte'
+  import { onMount, onDestroy } from 'svelte'
   import { trades } from '../lib/ws.js'
 
   export let agent          // full agent object (with portfolio.total_value)
   export let height = 80    // px
   export let width = '100%' // CSS width
 
-  const MAX_POINTS = 120    // rolling window of snapshots
+  const MAX_POINTS = 500    // rolling window of snapshots
 
   // History array: { t: timestamp_ms, v: total_value }
   let history = []
   let prevValue = null
+  let seeded = false
 
-  // Snapshot whenever agent.portfolio.total_value changes
-  $: if (agent?.portfolio?.total_value != null) {
+  // Seed history from REST on mount so chart survives page refresh
+  onMount(async () => {
+    try {
+      const res = await fetch(`/api/agents/${agent.id}/equity?limit=500`)
+      if (res.ok) {
+        const rows = await res.json()
+        if (rows.length > 0) {
+          history = rows.map(r => ({ t: new Date(r.timestamp).getTime(), v: r.total_value }))
+          prevValue = history[history.length - 1].v
+        }
+      }
+    } catch (e) {
+      // silently ignore — chart will build from live data
+    }
+    seeded = true
+  })
+
+  // Snapshot whenever agent.portfolio.total_value changes (after seed)
+  $: if (seeded && agent?.portfolio?.total_value != null) {
     const v = agent.portfolio.total_value
     if (v !== prevValue) {
       prevValue = v

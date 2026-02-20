@@ -16,10 +16,10 @@
   $: totalPnl = totalValue - totalAllowance
   $: totalPnlPct = totalAllowance > 0 ? (totalPnl / totalAllowance) * 100 : 0
 
-  $: tradeCount = $trades.length
-
-  $: buyCount = $trades.filter(t => t.side === 'buy').length
-  $: sellCount = $trades.filter(t => t.side === 'sell').length
+  $: realTrades = $trades.filter(t => t.side !== 'hold')
+  $: tradeCount = realTrades.length
+  $: buyCount  = realTrades.filter(t => t.side === 'buy').length
+  $: sellCount = realTrades.filter(t => t.side === 'sell').length
 
   // Best performing agent
   $: bestAgent = agentList.reduce((best, a) => {

@@ -275,9 +275,14 @@ class Agent:
         if now - self._last_run_at < self.trade_interval:
             return  # not time yet
 
-        # Set started_at on first run
+        # Set started_at on first run and persist it
         if self.started_at is None:
             self.started_at = now
+            with get_db() as conn:
+                conn.execute(
+                    "UPDATE agents SET started_at = ? WHERE id = ?",
+                    (now, self.agent_id),
+                )
 
         # Check max_duration auto-stop
         if self.max_duration and (now - self.started_at) >= self.max_duration:
@@ -392,7 +397,7 @@ class AgentRegistry:
         with get_db() as conn:
             rows = conn.execute(
                 """SELECT id, name, model, mode, allowance, goal,
-                          trade_interval, risk_profile, max_duration
+                          trade_interval, risk_profile, max_duration, started_at
                    FROM agents WHERE active = 1"""
             ).fetchall()
         for row in rows:
@@ -410,6 +415,8 @@ class AgentRegistry:
                 on_decision=on_decision,
                 on_thought=on_thought,
             )
+            # Restore started_at so session timer survives restarts
+            agent.started_at = row["started_at"]
             # Portfolio._load() already reconstructs cash + holdings from DB
             self._agents[row["id"]] = agent
         count = len(rows)
@@ -420,4 +427,7 @@ class AgentRegistry:
     def remove(self, agent_id: str):
         self._agents.pop(agent_id, None)
         with get_db() as conn:
-            conn.execute("UPDATE agents SET active = 0 WHERE id = ?", (agent_id,))
+            conn.execute(
+                "UPDATE agents SET active = 0, started_at = NULL WHERE id = ?",
+                (agent_id,),
+            )
