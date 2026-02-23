@@ -217,7 +217,9 @@ cmd_server() {
       ssh_timone "
         set -e
         cd ~/apps/PhantomEx
+        git stash 2>/dev/null || true
         git pull origin main
+        git stash drop 2>/dev/null || true
         venv/bin/pip install -q -r backend/requirements.txt
         npm --prefix frontend install --silent
         npm --prefix frontend run build

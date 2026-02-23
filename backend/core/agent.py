@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+import httpx
 import ollama
 import os
 
@@ -19,7 +20,17 @@ from core.db import get_db
 
 # Use OLLAMA_HOST env var if set (e.g. timone uses port 8081)
 _ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-_ollama_client = ollama.Client(host=_ollama_host)
+_ollama_client = ollama.AsyncClient(host=_ollama_host)
+
+
+async def _unload_model(model: str):
+    """Explicitly unload a model from Ollama VRAM (keep_alive=0)."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(f"{_ollama_host}/api/generate", json={"model": model, "keep_alive": 0})
+        print(f"[ollama] Unloaded {model}")
+    except Exception as e:
+        print(f"[ollama] Warn: failed to unload {model}: {e}")
 
 # How many user+assistant message pairs to keep in rolling history
 MAX_HISTORY_PAIRS = 10  # = 20 messages
@@ -155,6 +166,7 @@ class Agent:
         self.on_thought = on_thought
         self.portfolio = Portfolio(agent_id)
         self._running = False
+        self._stopped = False  # True once max_duration reached or explicitly removed
         self._pending_decision: Optional[dict] = None
         self.last_thought: Optional[dict] = None  # last model decision + reasoning
         self._chat_history: list[dict] = []  # rolling conversation history (user+assistant pairs)
@@ -172,7 +184,7 @@ class Agent:
         messages = [system_msg] + self._chat_history + [user_msg]
 
         # keep_alive keeps model loaded in GPU VRAM between cycles (5 min)
-        response = _ollama_client.chat(
+        response = await _ollama_client.chat(
             model=self.model,
             messages=messages,
             keep_alive=300,
@@ -271,6 +283,8 @@ class Agent:
         """Single decision cycle. Skips if trade_interval has not elapsed."""
         if not prices:
             return
+        if self._stopped:
+            return
         now = time.time()
         if now - self._last_run_at < self.trade_interval:
             return  # not time yet
@@ -290,6 +304,8 @@ class Agent:
         if self.max_duration and (now - self.started_at) >= self.max_duration:
             print(f"[agent:{self.name}] Session limit ({self.max_duration}s) reached — stopping.")
             self._running = False
+            self._stopped = True
+            self._last_run_at = now  # prevent re-triggering before _stopped takes effect
             if self.on_thought:
                 await self.on_thought(self.agent_id)  # broadcast stopped state
             return
@@ -403,6 +419,7 @@ class AgentRegistry:
                           trade_interval, risk_profile, max_duration, started_at
                    FROM agents WHERE active = 1"""
             ).fetchall()
+        now = time.time()
         for row in rows:
             agent = Agent(
                 agent_id=row["id"],
@@ -420,7 +437,15 @@ class AgentRegistry:
             )
             # Restore started_at so session timer survives restarts
             agent.started_at = row["started_at"]
-            agent._running = True  # mark as running — loop driven by price ticks
+            # If max_duration elapsed while server was down, restore as stopped
+            max_dur = row["max_duration"]
+            started = row["started_at"]
+            if max_dur and started and (now - started) >= max_dur:
+                agent._running = False
+                agent._stopped = True
+                print(f"[registry] Agent '{row['name']}' session expired during downtime — restored as stopped.")
+            else:
+                agent._running = True  # loop driven by price ticks
             # Portfolio._load() already reconstructs cash + holdings from DB
             self._agents[row["id"]] = agent
         count = len(rows)
@@ -428,10 +453,27 @@ class AgentRegistry:
             print(f"[registry] Restored {count} agent(s) from database.")
         return count
 
-    def remove(self, agent_id: str):
-        self._agents.pop(agent_id, None)
+    async def remove(self, agent_id: str):
+        agent = self._agents.pop(agent_id, None)
         with get_db() as conn:
             conn.execute(
                 "UPDATE agents SET active = 0, started_at = NULL WHERE id = ?",
                 (agent_id,),
             )
+        if agent:
+            agent._stopped = True
+            agent._running = False
+            # Unload model from VRAM only if no other active agents use the same model
+            if not any(a.model == agent.model for a in self._agents.values()):
+                await _unload_model(agent.model)
+
+    async def stop_all(self):
+        """Stop all agents and unload all models. Called on server shutdown."""
+        models = {a.model for a in self._agents.values()}
+        for agent in self._agents.values():
+            agent._stopped = True
+            agent._running = False
+        for model in models:
+            await _unload_model(model)
+        if self._agents:
+            print(f"[registry] Stopped {len(self._agents)} agent(s), unloaded {len(models)} model(s).")

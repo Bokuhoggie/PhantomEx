@@ -46,7 +46,11 @@ class ConnectionManager:
             self.active.remove(ws)
 
     async def send_to(self, ws: WebSocket, message: dict):
-        await ws.send_text(json.dumps(message))
+        try:
+            await ws.send_text(json.dumps(message))
+        except Exception:
+            if ws in self.active:
+                self.active.remove(ws)
 
 
 ws_manager = ConnectionManager()
@@ -133,6 +137,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(market_feed.start())
     print("[phantomex] Server started.")
     yield
+    await agent_registry.stop_all()
     await market_feed.stop()
     print("[phantomex] Server stopped.")
 
@@ -264,7 +269,7 @@ async def delete_agent(agent_id: str):
     agent = agent_registry.get(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    agent_registry.remove(agent_id)
+    await agent_registry.remove(agent_id)
     await ws_manager.broadcast({"type": "agent_removed", "agent_id": agent_id})
     return {"ok": True}
 
