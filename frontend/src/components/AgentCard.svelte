@@ -101,11 +101,6 @@
     }
   }
 
-  async function deleteAgent() {
-    if (!confirm(`Remove agent "${agent.name}"?`)) return
-    await fetch(`/api/agents/${agent.id}`, { method: 'DELETE' })
-  }
-
   async function saveSession() {
     saving = true
     saveSummary = ''
