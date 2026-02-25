@@ -1,5 +1,5 @@
 <script>
-  import { approveTrade, rejectTrade, pendingDecisions, trades, prices } from '../lib/ws.js'
+  import { approveTrade, rejectTrade, pendingDecisions, trades, prices, sessionRefreshToken } from '../lib/ws.js'
   import PortfolioChart from './PortfolioChart.svelte'
 
   export let agent
@@ -71,9 +71,12 @@
   let tradeFlash  = false
   let saving      = false
   let saveFlash   = false
+  let saveSummary = ''
   let depositAmount = ''
   let depositing    = false
   let depositError  = ''
+  // Delete confirmation: null | 'confirm' | 'saving'
+  let deleteState = null
 
   // ── Risk profile live toggle ─────────────────────────────────────────────────
   const RISK_CYCLE = ['aggressive', 'neutral', 'safe']
@@ -105,17 +108,36 @@
 
   async function saveSession() {
     saving = true
+    saveSummary = ''
     try {
-      await fetch(`/api/agents/${agent.id}/save_session`, {
+      const res = await fetch(`/api/agents/${agent.id}/save_session`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
       })
-      saveFlash = true
-      setTimeout(() => saveFlash = false, 2000)
+      if (res.ok) {
+        const data = await res.json()
+        saveSummary = data.summary || ''
+        sessionRefreshToken.update(n => n + 1)
+        saveFlash = true
+        setTimeout(() => { saveFlash = false; saveSummary = '' }, 6000)
+      }
     } finally {
       saving = false
     }
+  }
+
+  async function deleteAgent() {
+    deleteState = 'confirm'
+  }
+
+  async function confirmDelete(saveFirst) {
+    if (saveFirst) {
+      deleteState = 'saving'
+      await saveSession()
+    }
+    deleteState = null
+    await fetch(`/api/agents/${agent.id}`, { method: 'DELETE' })
   }
 
   async function toggleMode() {
@@ -196,12 +218,38 @@
     </div>
     <div class="header-right">
       <span class="status-dot {statusClass}">{statusLabel}</span>
-      <button class="icon-btn delete" on:click={deleteAgent} title="Remove agent">✕</button>
+      {#if deleteState === null}
+        <button class="icon-btn delete" on:click={deleteAgent} title="Remove agent">✕</button>
+      {/if}
     </div>
   </div>
 
   {#if agent.goal}
     <div class="goal-line">🎯 {agent.goal}</div>
+  {/if}
+
+  <!-- ── Delete confirmation ── -->
+  {#if deleteState === 'confirm' || deleteState === 'saving'}
+    <div class="delete-confirm">
+      {#if deleteState === 'saving'}
+        <span class="dc-msg">Saving session…</span>
+      {:else}
+        <span class="dc-msg">Save session before removing?</span>
+        <div class="dc-btns">
+          <button class="dc-save" on:click={() => confirmDelete(true)}>💾 Save & Remove</button>
+          <button class="dc-remove" on:click={() => confirmDelete(false)}>Remove</button>
+          <button class="dc-cancel" on:click={() => deleteState = null}>Cancel</button>
+        </div>
+      {/if}
+    </div>
+  {/if}
+
+  <!-- ── Save summary flash ── -->
+  {#if saveFlash && saveSummary}
+    <div class="save-summary-flash">
+      <span class="ssf-label">AI Summary</span>
+      {saveSummary}
+    </div>
   {/if}
 
   <!-- ── Equity Chart ── -->
@@ -419,6 +467,44 @@
   .goal-line {
     font-size: 0.72rem; color: #5a4a8a; font-style: italic;
     border-left: 2px solid #2e2060; padding-left: 0.5rem; line-height: 1.3;
+  }
+
+  /* Delete confirmation */
+  .delete-confirm {
+    background: #100a20; border: 1px solid #3a2a5a;
+    border-radius: 6px; padding: 0.5rem 0.7rem;
+    display: flex; flex-direction: column; gap: 0.35rem;
+  }
+  .dc-msg { font-size: 0.72rem; color: #c0b0e0; }
+  .dc-btns { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .dc-save {
+    background: #1a2a4a; color: #6090e0; border: 1px solid #3a5a9a;
+    padding: 3px 10px; border-radius: 4px; font-size: 0.7rem; cursor: pointer;
+  }
+  .dc-save:hover { background: #2a3a6a; }
+  .dc-remove {
+    background: #200a0a; color: #ff4d6d; border: 1px solid #5a1a2a;
+    padding: 3px 10px; border-radius: 4px; font-size: 0.7rem; cursor: pointer;
+  }
+  .dc-remove:hover { background: #3a1020; }
+  .dc-cancel {
+    background: none; color: #444; border: 1px solid #2a2a3a;
+    padding: 3px 10px; border-radius: 4px; font-size: 0.7rem; cursor: pointer;
+  }
+  .dc-cancel:hover { color: #888; }
+
+  /* Save summary flash */
+  .save-summary-flash {
+    background: #060e18; border: 1px solid #1a3a5a;
+    border-left: 3px solid #3a6a9a;
+    border-radius: 5px; padding: 0.4rem 0.6rem;
+    font-size: 0.7rem; color: #8ab0d8; line-height: 1.45;
+    font-style: italic;
+  }
+  .ssf-label {
+    display: block; font-size: 0.55rem; font-style: normal;
+    font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.06em; color: #3a6a9a; margin-bottom: 0.2rem;
   }
 
   /* Chart */

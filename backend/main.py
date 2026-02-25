@@ -5,11 +5,15 @@ Serves real-time market data, agent state, and trade events to connected clients
 
 import asyncio
 import json
+import os
 import time
 import uuid
+from collections import Counter
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Optional
 
+import ollama as _ollama
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -19,6 +23,77 @@ from core.db import init_db, get_db
 from core.market import MarketFeed, fetch_historical, DEFAULT_SYMBOLS
 from core.agent import AgentRegistry
 from core.portfolio import Portfolio
+
+_OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+_ollama_summary_client = _ollama.AsyncClient(host=_OLLAMA_HOST)
+
+
+async def _generate_session_summary(
+    agent_name: str, model: str, risk_profile: str, goal: str,
+    allowance: float, final_value: float, pnl: float, pnl_pct: float,
+    buy_count: int, sell_count: int, hold_count: int,
+    trades_data: list, duration_secs,
+) -> str:
+    """Ask the agent's model to briefly analyse the trading session. Returns '' on failure."""
+    try:
+        asset_counts = Counter(
+            t["symbol"] for t in trades_data if t.get("side") in ("buy", "sell")
+        )
+        top_assets = ", ".join(f"{s}×{c}" for s, c in asset_counts.most_common(5)) or "none"
+        if duration_secs:
+            h = int(duration_secs // 3600)
+            m = int((duration_secs % 3600) // 60)
+            dur_str = f"{h}h {m}m" if h else f"{m}m"
+        else:
+            dur_str = "unknown"
+
+        prompt = (
+            f"Briefly analyse this paper crypto trading session in 2-4 sentences.\n"
+            f"Agent: {agent_name}  Model: {model}  Risk: {risk_profile}\n"
+            f"Goal: {goal or 'none specified'}\n"
+            f"Duration: {dur_str}\n"
+            f"Starting balance: ${allowance:,.2f}  Final value: ${final_value:,.2f}\n"
+            f"P&L: {'+' if pnl >= 0 else ''}{pnl:,.2f} ({'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%)\n"
+            f"Decisions: {buy_count} buys  {sell_count} sells  {hold_count} holds\n"
+            f"Top assets traded: {top_assets}\n\n"
+            "Be direct and factual. Cover: profitability, main trading patterns, risk behaviour, "
+            "and one concrete suggestion for improvement. Max 4 sentences."
+        )
+        resp = await asyncio.wait_for(
+            _ollama_summary_client.chat(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                options={"temperature": 0.3, "num_predict": 300},
+            ),
+            timeout=90,
+        )
+        return resp["message"]["content"].strip()
+    except Exception as exc:
+        print(f"[save_session] Summary generation skipped: {exc}")
+        return ""
+
+
+def _portfolio_from_db(agent_id: str, prices: dict, conn) -> dict:
+    """Reconstruct portfolio cash+value for any agent from its DB records."""
+    agent_row = conn.execute("SELECT allowance FROM agents WHERE id = ?", (agent_id,)).fetchone()
+    if not agent_row:
+        return {"cash": 0, "holdings_value": 0, "total_value": 0}
+    cash = agent_row["allowance"]
+    for t in conn.execute(
+        "SELECT side, total FROM trades WHERE agent_id = ? ORDER BY timestamp ASC", (agent_id,)
+    ):
+        if t["side"] == "buy":
+            cash -= t["total"]
+        elif t["side"] == "sell":
+            cash += t["total"]
+    holdings_value = sum(
+        h["quantity"] * prices.get(h["symbol"], {}).get("price", h["avg_cost"])
+        for h in conn.execute(
+            "SELECT symbol, quantity, avg_cost FROM portfolios WHERE agent_id = ? AND quantity > 0.000001",
+            (agent_id,),
+        )
+    )
+    return {"cash": cash, "holdings_value": holdings_value, "total_value": cash + holdings_value}
 
 
 # ── WebSocket connection manager ──────────────────────────────────────────────
@@ -105,7 +180,6 @@ async def on_thought(agent_id: str):
             "data": {**agent.to_dict(), "portfolio": port},
         })
         # Persist equity snapshot so chart survives page refresh
-        from datetime import datetime, timezone
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         with get_db() as conn:
             conn.execute(
@@ -385,8 +459,7 @@ async def get_symbols():
 @app.post("/api/agents/{agent_id}/save_session")
 async def save_session(agent_id: str, body: dict = {}):
     """Snapshot the current agent session into saved_sessions for training data / review."""
-    import json as _json  # avoid conflict with module-level json
-    from datetime import datetime, timezone
+    import json as _json
     agent = agent_registry.get(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -403,9 +476,9 @@ async def save_session(agent_id: str, body: dict = {}):
     pnl_pct = (pnl / allowance * 100) if allowance else 0
     saved_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     notes = body.get("notes", "")
+    goal = agent.goal or ""
 
     with get_db() as conn:
-        # Pull all trades for this agent
         trade_rows = conn.execute(
             "SELECT * FROM trades WHERE agent_id = ? ORDER BY timestamp ASC",
             (agent_id,),
@@ -417,7 +490,6 @@ async def save_session(agent_id: str, body: dict = {}):
         hold_count = sum(1 for t in trades_data if t["side"] == "hold")
         trade_count = buy_count + sell_count
 
-        # Pull equity curve
         eq_rows = conn.execute(
             "SELECT total_value, cash, timestamp FROM equity_snapshots WHERE agent_id = ? ORDER BY timestamp ASC",
             (agent_id,),
@@ -428,20 +500,32 @@ async def save_session(agent_id: str, body: dict = {}):
             """INSERT INTO saved_sessions
                (agent_id, agent_name, model, risk_profile, allowance, final_value,
                 pnl, pnl_pct, trade_count, buy_count, sell_count, hold_count,
-                started_at, ended_at, duration_secs, notes, trades_json, equity_json, saved_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                started_at, ended_at, duration_secs, goal, notes, summary,
+                trades_json, equity_json, saved_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 agent_id, agent.name, agent.model, agent.risk_profile,
                 allowance, final_value, pnl, pnl_pct,
                 trade_count, buy_count, sell_count, hold_count,
                 started_at, ended_at, duration,
-                notes,
+                goal, notes, "",
                 _json.dumps(trades_data),
                 _json.dumps(equity_data),
                 saved_at,
             ),
         )
         session_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    # Generate AI summary after inserting so we don't block the insert
+    summary = await _generate_session_summary(
+        agent.name, agent.model, agent.risk_profile, goal,
+        allowance, final_value, pnl, pnl_pct,
+        buy_count, sell_count, hold_count,
+        trades_data, duration,
+    )
+    if summary:
+        with get_db() as conn:
+            conn.execute("UPDATE saved_sessions SET summary = ? WHERE id = ?", (summary, session_id))
 
     return {
         "ok": True,
@@ -451,6 +535,7 @@ async def save_session(agent_id: str, body: dict = {}):
         "pnl_pct": pnl_pct,
         "trade_count": trade_count,
         "saved_at": saved_at,
+        "summary": summary,
     }
 
 
@@ -489,6 +574,203 @@ async def delete_session(session_id: int):
     with get_db() as conn:
         conn.execute("DELETE FROM saved_sessions WHERE id = ?", (session_id,))
     return {"ok": True}
+
+
+@app.post("/api/agents/{agent_id}/recover_session")
+async def recover_session(agent_id: str, body: dict = {}):
+    """Save a complete session snapshot from any agent (active or inactive) using full DB history.
+    Useful for recovering sessions from agents that were deleted before saving."""
+    import json as _json
+
+    prices = market_feed.get_prices()
+    with get_db() as conn:
+        agent_row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        if not agent_row:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        trade_rows = conn.execute(
+            "SELECT * FROM trades WHERE agent_id = ? ORDER BY timestamp ASC", (agent_id,)
+        ).fetchall()
+        trades_data = [dict(r) for r in trade_rows]
+        buy_count  = sum(1 for t in trades_data if t["side"] == "buy")
+        sell_count = sum(1 for t in trades_data if t["side"] == "sell")
+        hold_count = sum(1 for t in trades_data if t["side"] == "hold")
+        trade_count = buy_count + sell_count
+
+        eq_rows = conn.execute(
+            "SELECT total_value, cash, timestamp FROM equity_snapshots WHERE agent_id = ? ORDER BY timestamp ASC",
+            (agent_id,),
+        ).fetchall()
+        equity_data = [dict(r) for r in eq_rows]
+
+        # Portfolio: prefer last equity snapshot (reflects actual state), fall back to trade replay
+        if equity_data:
+            final_value = equity_data[-1]["total_value"]
+        else:
+            port = _portfolio_from_db(agent_id, prices, conn)
+            final_value = port["total_value"]
+
+        allowance = agent_row["allowance"]
+        pnl = final_value - allowance
+        pnl_pct = (pnl / allowance * 100) if allowance else 0
+
+        # Timing: started_at from DB or infer from first trade
+        started_at = agent_row["started_at"]
+        if not started_at and trades_data:
+            started_at = datetime.fromisoformat(
+                trades_data[0]["timestamp"].replace("Z", "+00:00")
+            ).timestamp()
+        # ended_at: last trade for inactive agents, now for active
+        if not agent_row["active"] and trades_data:
+            ended_at = datetime.fromisoformat(
+                trades_data[-1]["timestamp"].replace("Z", "+00:00")
+            ).timestamp()
+        else:
+            ended_at = time.time()
+
+        duration = (ended_at - started_at) if started_at else None
+        goal = agent_row["goal"] or ""
+        notes = body.get("notes", "")
+        saved_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        conn.execute(
+            """INSERT INTO saved_sessions
+               (agent_id, agent_name, model, risk_profile, allowance, final_value,
+                pnl, pnl_pct, trade_count, buy_count, sell_count, hold_count,
+                started_at, ended_at, duration_secs, goal, notes, summary,
+                trades_json, equity_json, saved_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                agent_id, agent_row["name"], agent_row["model"],
+                agent_row["risk_profile"] or "neutral",
+                allowance, final_value, pnl, pnl_pct,
+                trade_count, buy_count, sell_count, hold_count,
+                started_at, ended_at, duration,
+                goal, notes, "",
+                _json.dumps(trades_data),
+                _json.dumps(equity_data),
+                saved_at,
+            ),
+        )
+        session_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    summary = await _generate_session_summary(
+        agent_row["name"], agent_row["model"], agent_row["risk_profile"] or "neutral", goal,
+        allowance, final_value, pnl, pnl_pct,
+        buy_count, sell_count, hold_count,
+        trades_data, duration,
+    )
+    if summary:
+        with get_db() as conn:
+            conn.execute("UPDATE saved_sessions SET summary = ? WHERE id = ?", (summary, session_id))
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "agent_name": agent_row["name"],
+        "pnl": pnl,
+        "pnl_pct": pnl_pct,
+        "trade_count": trade_count,
+        "saved_at": saved_at,
+        "summary": summary,
+    }
+
+
+@app.post("/api/sessions/{session_id}/recapture")
+async def recapture_session(session_id: int):
+    """Rebuild an existing saved session with the agent's complete DB history.
+    Fixes sessions that were saved too early (incomplete trade counts / wrong duration)."""
+    import json as _json
+
+    prices = market_feed.get_prices()
+    with get_db() as conn:
+        sess_row = conn.execute(
+            "SELECT * FROM saved_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if not sess_row:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        agent_id = sess_row["agent_id"]
+        agent_row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        if not agent_row:
+            raise HTTPException(status_code=404, detail="Agent data not found")
+
+        trade_rows = conn.execute(
+            "SELECT * FROM trades WHERE agent_id = ? ORDER BY timestamp ASC", (agent_id,)
+        ).fetchall()
+        trades_data = [dict(r) for r in trade_rows]
+        buy_count  = sum(1 for t in trades_data if t["side"] == "buy")
+        sell_count = sum(1 for t in trades_data if t["side"] == "sell")
+        hold_count = sum(1 for t in trades_data if t["side"] == "hold")
+        trade_count = buy_count + sell_count
+
+        eq_rows = conn.execute(
+            "SELECT total_value, cash, timestamp FROM equity_snapshots WHERE agent_id = ? ORDER BY timestamp ASC",
+            (agent_id,),
+        ).fetchall()
+        equity_data = [dict(r) for r in eq_rows]
+
+        # Use last equity snapshot for final_value (most accurate historical record)
+        if equity_data:
+            final_value = equity_data[-1]["total_value"]
+        else:
+            port = _portfolio_from_db(agent_id, prices, conn)
+            final_value = port["total_value"]
+
+        allowance = agent_row["allowance"]
+        pnl = final_value - allowance
+        pnl_pct = (pnl / allowance * 100) if allowance else 0
+
+        started_at = agent_row["started_at"]
+        if not started_at and trades_data:
+            started_at = datetime.fromisoformat(
+                trades_data[0]["timestamp"].replace("Z", "+00:00")
+            ).timestamp()
+        if not agent_row["active"] and trades_data:
+            ended_at = datetime.fromisoformat(
+                trades_data[-1]["timestamp"].replace("Z", "+00:00")
+            ).timestamp()
+        else:
+            ended_at = sess_row["ended_at"]
+        duration = (ended_at - started_at) if started_at else None
+
+        goal = agent_row["goal"] or ""
+        conn.execute(
+            """UPDATE saved_sessions SET
+               final_value=?, pnl=?, pnl_pct=?,
+               trade_count=?, buy_count=?, sell_count=?, hold_count=?,
+               started_at=?, ended_at=?, duration_secs=?,
+               goal=?, trades_json=?, equity_json=?
+               WHERE id=?""",
+            (
+                final_value, pnl, pnl_pct,
+                trade_count, buy_count, sell_count, hold_count,
+                started_at, ended_at, duration,
+                goal,
+                _json.dumps(trades_data),
+                _json.dumps(equity_data),
+                session_id,
+            ),
+        )
+
+    summary = await _generate_session_summary(
+        agent_row["name"], agent_row["model"], agent_row["risk_profile"] or "neutral", goal,
+        allowance, final_value, pnl, pnl_pct,
+        buy_count, sell_count, hold_count,
+        trades_data, duration,
+    )
+    if summary:
+        with get_db() as conn:
+            conn.execute("UPDATE saved_sessions SET summary = ? WHERE id = ?", (summary, session_id))
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "trade_count": trade_count,
+        "pnl": pnl,
+        "duration_secs": duration,
+        "summary": summary,
+    }
 
 
 @app.get("/api/agents/{agent_id}/equity")

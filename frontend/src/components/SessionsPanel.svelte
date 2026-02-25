@@ -2,8 +2,10 @@
   /**
    * SessionsPanel — browse and inspect saved session snapshots.
    * Fetches from GET /api/sessions on mount, supports expand/detail view and delete.
+   * Auto-refreshes when sessionRefreshToken increments (e.g. after AgentCard saves).
    */
   import { onMount } from 'svelte'
+  import { sessionRefreshToken } from '../lib/ws.js'
 
   let sessions = []
   let loading  = true
@@ -12,10 +14,18 @@
   let detail   = null   // full session detail (trades + equity)
   let loadingDetail = false
   let deletingId = null
+  let recapturingId = null
 
   onMount(async () => {
     await refresh()
   })
+
+  // Auto-refresh whenever a session is saved from an AgentCard
+  let _prevToken = 0
+  $: if ($sessionRefreshToken !== _prevToken) {
+    _prevToken = $sessionRefreshToken
+    refresh()
+  }
 
   async function refresh() {
     loading = true
@@ -58,6 +68,28 @@
       if (expanded === id) { expanded = null; detail = null }
     } finally {
       deletingId = null
+    }
+  }
+
+  async function recaptureSession(id, e) {
+    e.stopPropagation()
+    recapturingId = id
+    try {
+      const res = await fetch(`/api/sessions/${id}/recapture`, { method: 'POST' })
+      if (res.ok) {
+        // Refresh the list and re-expand with updated detail
+        await refresh()
+        if (expanded === id) {
+          detail = null
+          loadingDetail = true
+          try {
+            const r = await fetch(`/api/sessions/${id}`)
+            if (r.ok) detail = await r.json()
+          } finally { loadingDetail = false }
+        }
+      }
+    } finally {
+      recapturingId = null
     }
   }
 
@@ -143,6 +175,12 @@
           <div class="sr-actions">
             <span class="sr-expand">{expanded === s.id ? '▲' : '▼'}</span>
             <button
+              class="recap-btn"
+              on:click={e => recaptureSession(s.id, e)}
+              disabled={recapturingId === s.id}
+              title="Rebuild session from full agent history"
+            >{recapturingId === s.id ? '…' : '⟳'}</button>
+            <button
               class="del-btn"
               on:click={e => deleteSession(s.id, e)}
               disabled={deletingId === s.id}
@@ -185,6 +223,19 @@
                   </span>
                 </div>
               </div>
+
+              <!-- Goal -->
+              {#if detail.goal}
+                <div class="detail-goal">🎯 {detail.goal}</div>
+              {/if}
+
+              <!-- AI Summary -->
+              {#if detail.summary}
+                <div class="detail-summary">
+                  <span class="summary-label">AI Analysis</span>
+                  {detail.summary}
+                </div>
+              {/if}
 
               <!-- Notes -->
               {#if detail.notes}
@@ -349,6 +400,18 @@
     flex-shrink: 0;
   }
   .sr-expand { font-size: 0.65rem; color: #444; }
+  .recap-btn {
+    background: none;
+    border: none;
+    color: #334;
+    cursor: pointer;
+    font-size: 0.78rem;
+    padding: 2px 4px;
+    border-radius: 3px;
+    transition: color 0.15s;
+  }
+  .recap-btn:hover:not(:disabled) { color: #6090e0; }
+  .recap-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .del-btn {
     background: none;
     border: none;
@@ -398,6 +461,39 @@
     display: flex;
     gap: 0.3rem;
     align-items: baseline;
+  }
+
+  /* Goal */
+  .detail-goal {
+    font-size: 0.7rem;
+    color: #5a4a8a;
+    font-style: italic;
+    padding: 0.25rem 0.5rem;
+    border-left: 2px solid #2e2060;
+    line-height: 1.4;
+  }
+
+  /* AI Summary */
+  .detail-summary {
+    background: #06080e;
+    border: 1px solid #1a2a3a;
+    border-left: 3px solid #2a4a7a;
+    border-radius: 4px;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.7rem;
+    color: #7a9abb;
+    line-height: 1.5;
+    font-style: italic;
+  }
+  .summary-label {
+    display: block;
+    font-size: 0.55rem;
+    font-style: normal;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #2a4a7a;
+    margin-bottom: 0.2rem;
   }
 
   /* Notes */

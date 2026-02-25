@@ -103,7 +103,9 @@ def init_db():
                 started_at   REAL,
                 ended_at     REAL NOT NULL,
                 duration_secs REAL,
+                goal         TEXT NOT NULL DEFAULT '',
                 notes        TEXT NOT NULL DEFAULT '',
+                summary      TEXT NOT NULL DEFAULT '',
                 trades_json  TEXT NOT NULL DEFAULT '[]',
                 equity_json  TEXT NOT NULL DEFAULT '[]',
                 saved_at     TEXT NOT NULL
@@ -137,4 +139,10 @@ def init_db():
             conn.execute("ALTER TABLE agents ADD COLUMN max_duration REAL")
         if "started_at" not in cols:
             conn.execute("ALTER TABLE agents ADD COLUMN started_at REAL")
+        # Migrations for saved_sessions
+        ss_cols = [r[1] for r in conn.execute("PRAGMA table_info(saved_sessions)").fetchall()]
+        if "goal" not in ss_cols:
+            conn.execute("ALTER TABLE saved_sessions ADD COLUMN goal TEXT NOT NULL DEFAULT ''")
+        if "summary" not in ss_cols:
+            conn.execute("ALTER TABLE saved_sessions ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
     print("[db] Database initialized.")

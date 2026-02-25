@@ -6,12 +6,13 @@
 
 import { writable, get } from 'svelte/store'
 
-export const connected        = writable(false)
-export const prices           = writable({})
-export const agents           = writable({})          // agent_id -> agent state
-export const trades           = writable([])          // recent trade log (newest first)
-export const pendingDecisions = writable({})          // agent_id -> decision
-export const deploymentLog    = writable([])          // [{id, name, model, action, ts}]
+export const connected           = writable(false)
+export const prices              = writable({})
+export const agents              = writable({})          // agent_id -> agent state
+export const trades              = writable([])          // recent trade log (newest first)
+export const pendingDecisions    = writable({})          // agent_id -> decision
+export const deploymentLog       = writable([])          // [{id, name, model, action, ts}]
+export const sessionRefreshToken = writable(0)           // increment to trigger SessionsPanel refresh
 
 const WIPE_KEY = 'phantomex_wipe_before'
 

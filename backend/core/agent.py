@@ -457,7 +457,7 @@ class AgentRegistry:
         agent = self._agents.pop(agent_id, None)
         with get_db() as conn:
             conn.execute(
-                "UPDATE agents SET active = 0, started_at = NULL WHERE id = ?",
+                "UPDATE agents SET active = 0 WHERE id = ?",
                 (agent_id,),
             )
         if agent:
